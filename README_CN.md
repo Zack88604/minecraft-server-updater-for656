@@ -1,68 +1,125 @@
 # Minecraft 自动更新服务
 
-为 Minecraft 客户端提供自包含的自动更新方案，由 Docker 容器（HTTP API）和 Java Agent 组成。运行时无外部脚本或进程调用 — 杀软白名单只需添加一个 JAR。
+> 通过自托管 HTTP API 与 Java Agent，自动同步并更新 Minecraft 客户端资源。
+
+[English](./README.md)
+
+## 概述
+
+本项目提供了一套轻量级、自托管的方案，用于在多台机器之间保持 Minecraft 客户端资源（模组、配置、资源包等）的同步更新。它由两部分组成：
+
+| 组件 | 描述 |
+|------|------|
+| **服务端** | 基于 Flask 的 HTTP API 服务器，提供文件清单、版本信息、资源下载等服务，通过 Docker 运行。 |
+| **客户端 Agent** | 一个 Java Agent（`UpdateAgent.jar`），在 Minecraft 客户端启动时加载，检查更新、显示 GUI 进度窗口，并在游戏启动前完成文件同步。 |
 
 ## 架构
 
-```
-  Minecraft 客户端 (Java Agent)              Docker 容器 (Flask API)
-  ┌──────────────────────────┐              ┌──────────────────────────┐
-  │ -javaagent:UpdateAgent.jar│   HTTP GET   │ /api/version     版本号   │
-  │ premain() 阻塞启动        │◄────────────►│ /api/manifest    文件清单 │
-  │ GUI 显示进度              │              │ /api/files/*     文件下载 │
-  │ 下载更新文件              │              │ /api/generate    触发生成 │
-  │ 自动关闭 → MC 启动        │              │                        │
-  └──────────────────────────┘              │ 日志 → stdout (docker)   │
-                                            └──────────────────────────┘
-                                                     ▲
-                                                     │ 人工维护
-                                            ┌────────┴────────┐
-                                            │ generate_manifest│
-                                            │ (docker exec     │
-                                            │  或 HTTP API)    │
-                                            └─────────────────┘
+```mermaid
+flowchart LR
+    A[Minecraft 客户端] -->|"-javaagent"| B[UpdateAgent.jar]
+    B -->|"GET /api/version"| C[更新服务器]
+    B -->|"GET /api/manifest"| C
+    B -->|"GET /api/files/*"| C
+    C -->|"manifest.json"| D[(/data/files)]
+    C -->|"version.txt"| D
 ```
 
-## 项目结构
+## 特性
 
-```
-656-auto-update/
-├── Dockerfile                     # Docker 镜像构建
-├── README.md
-├── server/                        # 服务端（容器内运行）
-│   ├── app.py                     # Flask HTTP API
-│   ├── generate_manifest.py       # 资源清单生成工具
-│   ├── entrypoint.sh              # 容器启动入口
-│   └── requirements.txt           # 仅供参考，Flask 通过 apk 安装
-├── agent/                         # 客户端 Java Agent
-│   ├── src/UpdateAgent.java       # Agent 源码（纯 Java，无外部依赖）
-│   ├── META-INF/MANIFEST.MF       # JAR 清单文件
-│   ├── build.sh                   # 编译脚本 (Linux)
-│   ├── build.bat                  # 编译脚本 (Windows)
-│   ├── setup-agent.sh             # 安装脚本 (Linux)
-│   ├── setup-agent.bat            # 安装脚本 (Windows)
-│   └── UpdateAgent.jar            # 编译产物
-└── data/                          # 数据目录（挂载卷）
-    ├── files/                     # 需要分发的资源文件
-    ├── update-config.json         # 管理路径配置
-    ├── manifest.json              # 生成的资源清单
-    └── version.txt                # 当前版本号
-```
+- **基于版本的增量同步** — 仅当远程版本变化时才下载文件。
+- **选择性文件管理** — 通过 `update-config.json` 中的 `managed_paths` 精确控制同步范围。
+- **GUI 进度窗口** — 玩家在游戏启动前即可看到更新状态。
+- **Docker 化部署** — 基于 Alpine Linux 的单容器部署。
+- **跨平台 Agent** — Java Agent 兼容 Windows、Linux、macOS。
+- **RESTful API** — 清晰的 HTTP 接口：版本查询、清单获取、文件下载、配置查询、健康检查。
+- **按需生成清单** — 支持通过 HTTP API 或命令行重新生成文件清单。
 
----
+## 快速开始
 
-## 服务端部署
-
-### 1. 构建镜像
+### 1. 构建并运行服务端
 
 ```bash
-# 在项目根目录 (d:\dockerserver) 执行
-docker build -t mc-update-service -f 656-auto-update/Dockerfile .
+# 构建 Docker 镜像
+docker build -t mc-update-service -f Dockerfile .
+
+# 运行容器
+docker run -d \
+  -p 25565:25565 \
+  -v /path/to/your/files:/data/files \
+  --name mc-update \
+  mc-update-service
 ```
 
-### 2. 配置管理路径
+### 2. 生成资源清单
 
-在将要挂载为 `/data` 的目录下创建 `update-config.json`：
+将 Minecraft 资源文件（模组、配置等）放入挂载的 `files` 目录，然后生成清单：
+
+```bash
+# 通过 docker exec
+docker exec mc-update python3 /app/generate_manifest.py "1.0.0"
+
+# 或通过 HTTP API（需配置 GENERATE_TOKEN）
+curl -X POST "http://localhost:25565/api/generate?version=1.0.0" \
+  -H "X-Generate-Token: your-token"
+```
+
+### 3. 构建并安装 Agent
+
+```bash
+cd agent
+
+# 编译 Java Agent
+./build.sh          # Linux/macOS
+build.bat           # Windows
+
+# 安装 Agent 到 Minecraft 实例
+./setup-agent.sh ~/.minecraft/versions/1.20.1 http://your-server:25565
+```
+
+安装脚本会自动将 `-javaagent` 参数添加到 Minecraft 启动器的 JVM 选项中。
+
+## API 参考
+
+| 端点 | 方法 | 描述 |
+|------|------|------|
+| `/api/version` | GET | 获取当前远程版本号 |
+| `/api/manifest` | GET | 获取完整文件清单（路径、哈希值、大小） |
+| `/api/files/<path>` | GET | 下载指定资源文件 |
+| `/api/config` | GET | 获取更新配置（`managed_paths`） |
+| `/api/generate` | POST | 触发清单重新生成（Token 保护） |
+| `/api/health` | GET | 健康检查（清单 + 版本是否可用） |
+
+## 配置说明
+
+### 服务端环境变量
+
+| 变量 | 默认值 | 描述 |
+|------|--------|------|
+| `PORT` | `25565` | HTTP 服务端口 |
+| `HOST` | `0.0.0.0` | 绑定地址 |
+| `DATA_DIR` | `/data` | 数据目录根路径 |
+| `GENERATE_TOKEN` | *(空)* | `/api/generate` 接口的访问令牌 |
+| `DEBUG` | `false` | 是否启用 Flask 调试模式 |
+
+### Agent 系统属性
+
+通过 `-javaagent` 参数或 JVM 系统属性设置：
+
+| 属性 | 默认值 | 描述 |
+|------|--------|------|
+| `mc-update.server` | `http://localhost:25565` | 更新服务器地址 |
+| `mc-update.game-dir` | `.` | Minecraft 游戏目录 |
+| `mc-update.debug` | `false` | 是否显示关闭按钮并保持窗口打开 |
+
+示例：
+```
+-javaagent:UpdateAgent.jar=server=http://192.168.1.100:25565,game-dir=C:\minecraft,debug=true
+```
+
+### 管理路径配置
+
+在数据目录中创建 `update-config.json` 来控制需要同步的文件范围：
 
 ```json
 {
@@ -70,181 +127,34 @@ docker build -t mc-update-service -f 656-auto-update/Dockerfile .
     "mods/",
     "config/",
     "resourcepacks/",
-    "shaderpacks/"
+    "options.txt"
   ]
 }
 ```
 
-规则：
-- `mods/` — 以 `/` 结尾表示目录，匹配目录下所有文件
-- `options.txt` — 精确匹配单个文件
-- `*` — 匹配所有文件（配置文件不存在时的默认行为）
+- 以 `/` 结尾的路径表示递归匹配该目录下所有文件。
+- 不以 `/` 结尾的路径表示精确匹配该文件。
+- 使用 `["*"]` 表示包含所有文件（默认行为）。
 
-### 3. 启动容器
-
-```bash
-docker run -d \
-  --name mc-update \
-  -p 25565:25565 \
-  -v /你的/数据目录:/data \
-  mc-update-service
-```
-
-首次启动时若不存在清单，会自动生成版本号为 `0` 的默认清单。
-
-### 4. 生成资源清单
-
-更新 `/data/files/` 下的文件后，重新生成清单：
-
-```bash
-# 方式一：docker exec
-docker exec mc-update python3 /app/generate_manifest.py "1.1"
-
-# 方式二：HTTP API
-curl -X POST "http://<IP>:25565/api/generate?version=1.1"
-
-# 方式三：自动使用时间戳
-docker exec mc-update python3 /app/generate_manifest.py
-```
-
-如需保护生成接口，启动时设置 `GENERATE_TOKEN`：
-
-```bash
-docker run -d -e GENERATE_TOKEN=mysecret ...
-curl -X POST -H "X-Generate-Token: mysecret" "http://<IP>:25565/api/generate?version=1.1"
-```
-
-### 5. 查看日志
-
-```bash
-docker logs -f mc-update
-```
-
-所有日志直接输出到 stdout，容器内无日志文件。
-
----
-
-## 客户端部署（Java Agent）
-
-### 1. 编译 Agent
-
-```bash
-# Windows
-cd 656-auto-update\agent
-build.bat
-
-# Linux / macOS
-cd 656-auto-update/agent
-chmod +x build.sh && ./build.sh
-```
-
-需要 JDK 8+。输出文件：`UpdateAgent.jar`。
-
-### 2. 添加 JVM 参数
-
-在启动器（HMCL / PCL2 / Prism / 官方启动器）的 JVM 参数中添加：
+## 项目结构
 
 ```
--javaagent:/path/to/UpdateAgent.jar=server=http://192.168.1.100:25565
+├── Dockerfile                  # 服务端 Docker 镜像
+├── LICENSE                     # MIT 许可证
+├── server/
+│   ├── app.py                  # Flask API 服务端
+│   ├── entrypoint.sh           # 容器启动脚本
+│   ├── generate_manifest.py    # 资源清单生成工具
+│   └── requirements.txt        # Python 依赖
+├── agent/
+│   ├── src/
+│   │   └── UpdateAgent.java    # Java Agent 源码
+│   ├── META-INF/
+│   │   └── MANIFEST.MF         # JAR 清单文件
+│   ├── build.sh / build.bat    # 编译脚本
+│   └── setup-agent.sh / .bat   # 安装脚本
 ```
 
-| Agent 参数 | 系统属性 | 默认值 | 说明 |
-|-----------|---------|--------|------|
-| `server` | `mc-update.server` | `http://localhost:25565` | 更新服务地址 |
-| `game-dir` | `mc-update.game-dir` | 游戏目录 | Minecraft 目录 |
-| `debug` | `mc-update.debug` | `false` | 检查完成后保持窗口打开 |
+## 许可证
 
-多个参数用逗号分隔：
-
-```
--javaagent:UpdateAgent.jar=server=http://1.2.3.4:25565,game-dir=C:\mc,debug=true
-```
-
-### 3. 自动安装脚本（可选）
-
-```bash
-# Linux
-./agent/setup-agent.sh ~/.minecraft http://192.168.1.100:25565
-
-# Windows
-agent\setup-agent.bat C:\Users\You\AppData\Roaming\.minecraft http://192.168.1.100:25565
-```
-
-脚本会自动将 `-javaagent` 追加到 `user_jvm_args.txt`。
-
----
-
-## 工作流程
-
-1. **Agent 在 Minecraft 之前加载**（`premain()`）
-2. **阻塞 Minecraft 启动**（`CountDownLatch`）
-3. **弹出 GUI 窗口**，显示服务器、游戏目录、进度条、日志面板
-4. **GET /api/version** → 与本地 `.update_version` 比较
-5. 版本不同时：**GET /api/manifest** → 逐文件处理
-6. 对每个文件：计算本地 **SHA256** → 缺失或 hash 不一致则下载
-7. **清理过期文件**：管理目录内不在清单中的文件将被删除
-8. **释放 latch** → Minecraft 以更新后的文件启动
-9. 窗口自动关闭（debug 模式下保持打开）
-
-### Debug 模式
-
-```
--javaagent:UpdateAgent.jar=server=...,debug=true
-```
-
-开启后窗口在检查完成后不会自动关闭，显示 "Close" 按钮，方便查看完整日志。
-
----
-
-## API 接口
-
-| 方法 | 端点 | 说明 |
-|------|------|------|
-| GET | `/api/version` | 返回 `{"version":"1.0"}` |
-| GET | `/api/manifest` | 返回 `{"version":"1.0","managed_paths":[...],"files":[...]}` |
-| GET | `/api/files/<path>` | 下载资源文件 |
-| GET | `/api/config` | 服务端配置（managed_paths） |
-| GET | `/api/health` | 健康检查 `{"status":"ok","manifest":true,"version":true}` |
-| POST | `/api/generate?version=1.0` | 触发清单重新生成 |
-
----
-
-## 版本生命周期
-
-```
-人工更新流程：
-  修改 /data/files/ 下的文件
-    → docker exec ... generate_manifest.py "1.1"
-      → 扫描文件、计算 SHA256、写入 manifest.json + version.txt
-        → 客户端检测到新版本 → 下载更新 → 完成
-
-客户端启动流程：
-  启动 Minecraft
-    → Agent 请求 /api/version
-      → 版本一致？直接启动
-      → 版本不同？下载清单、逐文件校验 hash、下载更新
-        → Agent 窗口关闭 → Minecraft 以最新文件启动
-```
-
----
-
-## 文件管理策略
-
-客户端只操作清单中列出且位于 `managed_paths` 范围内的文件：
-
-- 在 `managed_paths` 内但**不在清单中** → **删除**（清理过期文件）
-- 在 `managed_paths` 内且**在清单中** → **校验 hash 并按需更新**
-- **不在** `managed_paths` 内 → **完全不动**（如存档、截图等）
-
----
-
-## 常见问题
-
-| 现象 | 排查方向 |
-|------|----------|
-| Agent 窗口显示 localhost | 检查 `server=` 参数或 `-Dmc-update.server=` 是否正确 |
-| "Manifest contains 0 file(s)" | 确认 manifest 中 `size` 字段为整数（非字符串） |
-| 文件下载 404 | 文件路径含特殊字符，检查 URL 编码 |
-| renameTo 失败 (Windows) | Agent 已在 rename 前删除目标文件 |
-| 窗口一闪而过 | 开启 `debug=true` 模式 |
-| 无法连接服务器 | 检查防火墙、端口映射、`docker logs` |
+MIT — 详见 [LICENSE](./LICENSE)。

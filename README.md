@@ -1,68 +1,125 @@
-# Minecraft Auto-Update Service
+# Minecraft Auto Update Service
 
-A self-contained auto-update system for Minecraft clients, consisting of a Docker-based HTTP server and a Java Agent. No external scripts or processes at runtime — single JAR whitelist for antivirus.
+> Automatically sync and update Minecraft client resources via a self-hosted HTTP API and a Java agent.
+
+[中文文档](./README_CN.md)
+
+## Overview
+
+This project provides a lightweight, self-hosted solution for keeping Minecraft client resources (mods, configs, resource packs, etc.) up to date across multiple machines. It consists of two parts:
+
+| Component | Description |
+|-----------|-------------|
+| **Server** | A Flask-based HTTP API server that hosts file manifests, version info, and resource downloads. Runs in Docker. |
+| **Agent** | A Java agent (`UpdateAgent.jar`) loaded at Minecraft client startup. It checks for updates, displays a GUI progress window, and syncs files before the game launches. |
 
 ## Architecture
 
-```
-  Minecraft Client (Java Agent)              Docker Container (Flask API)
-  ┌──────────────────────────┐              ┌──────────────────────────┐
-  │ -javaagent:UpdateAgent.jar│   HTTP GET   │ /api/version     version │
-  │ premain() blocks launch   │◄────────────►│ /api/manifest    files   │
-  │ GUI shows progress        │              │ /api/files/*     downloads│
-  │ Downloads updated files   │              │ /api/generate    trigger │
-  │ Auto-closes → MC starts   │              │                        │
-  └──────────────────────────┘              │ Logs → stdout (docker)   │
-                                            └──────────────────────────┘
-                                                     ▲
-                                                     │ manual
-                                            ┌────────┴────────┐
-                                            │ generate_manifest│
-                                            │    (via docker   │
-                                            │     exec or API) │
-                                            └─────────────────┘
+```mermaid
+flowchart LR
+    A[Minecraft Client] -->|"-javaagent"| B[UpdateAgent.jar]
+    B -->|"GET /api/version"| C[Update Server]
+    B -->|"GET /api/manifest"| C
+    B -->|"GET /api/files/*"| C
+    C -->|"manifest.json"| D[(/data/files)]
+    C -->|"version.txt"| D
 ```
 
-## Project Structure
+## Features
 
-```
-656-auto-update/
-├── Dockerfile                     # Docker image build
-├── README.md
-├── server/                        # Server (inside Docker container)
-│   ├── app.py                     # Flask HTTP API
-│   ├── generate_manifest.py       # Manifest generator CLI
-│   ├── entrypoint.sh              # Container entrypoint
-│   └── requirements.txt           # (reference only, Flask via apk)
-├── agent/                         # Client Java Agent
-│   ├── src/UpdateAgent.java       # Agent source (pure Java, no deps)
-│   ├── META-INF/MANIFEST.MF       # JAR manifest
-│   ├── build.sh                   # Build script (Linux)
-│   ├── build.bat                  # Build script (Windows)
-│   ├── setup-agent.sh             # Install agent to MC instance (Linux)
-│   ├── setup-agent.bat            # Install agent to MC instance (Windows)
-│   └── UpdateAgent.jar            # Pre-built agent (after build)
-└── data/                          # Data dir (volume mount)
-    ├── files/                     # Resource files to distribute
-    ├── update-config.json         # Managed paths config
-    ├── manifest.json              # Generated manifest
-    └── version.txt                # Current version
-```
+- **Version-aware sync** — Only downloads files when the remote version changes.
+- **Selective file management** — Control which files to sync via `managed_paths` in `update-config.json`.
+- **GUI progress window** — Player sees update status before the game starts.
+- **Dockerized server** — Single-container deployment with Alpine Linux.
+- **Cross-platform agent** — Java agent works on Windows, Linux, and macOS.
+- **RESTful API** — Clean HTTP endpoints for version, manifest, download, config, and health checks.
+- **On-demand manifest generation** — Regenerate file manifests via HTTP API or CLI.
 
----
+## Quick Start
 
-## Server Setup
-
-### 1. Build Docker Image
+### 1. Build and Run the Server
 
 ```bash
-# From project root (d:\dockerserver)
-docker build -t mc-update-service -f 656-auto-update/Dockerfile .
+# Build the Docker image
+docker build -t mc-update-service -f Dockerfile .
+
+# Run the container
+docker run -d \
+  -p 25565:25565 \
+  -v /path/to/your/files:/data/files \
+  --name mc-update \
+  mc-update-service
 ```
 
-### 2. Configure Managed Paths
+### 2. Generate a Manifest
 
-Create `data/update-config.json` in the directory you'll mount as `/data`:
+Place your Minecraft resource files (mods, configs, etc.) under the mounted `files` directory, then generate the manifest:
+
+```bash
+# Via docker exec
+docker exec mc-update python3 /app/generate_manifest.py "1.0.0"
+
+# Or via HTTP API (if GENERATE_TOKEN is configured)
+curl -X POST "http://localhost:25565/api/generate?version=1.0.0" \
+  -H "X-Generate-Token: your-token"
+```
+
+### 3. Build and Install the Agent
+
+```bash
+cd agent
+
+# Build the Java agent
+./build.sh          # Linux/macOS
+build.bat           # Windows
+
+# Install agent into a Minecraft instance
+./setup-agent.sh ~/.minecraft/versions/1.20.1 http://your-server:25565
+```
+
+The setup script adds the `-javaagent` argument to the Minecraft launcher's JVM options.
+
+## API Reference
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/version` | GET | Get the current remote version string |
+| `/api/manifest` | GET | Get the full file manifest (paths, hashes, sizes) |
+| `/api/files/<path>` | GET | Download a specific resource file |
+| `/api/config` | GET | Get update configuration (`managed_paths`) |
+| `/api/generate` | POST | Trigger manifest regeneration (token-protected) |
+| `/api/health` | GET | Health check (manifest + version availability) |
+
+## Configuration
+
+### Server Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `25565` | HTTP server port |
+| `HOST` | `0.0.0.0` | Bind address |
+| `DATA_DIR` | `/data` | Data directory root |
+| `GENERATE_TOKEN` | *(empty)* | Token for `/api/generate` protection |
+| `DEBUG` | `false` | Enable Flask debug mode |
+
+### Agent System Properties
+
+Set via `-javaagent` arguments or JVM system properties:
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `mc-update.server` | `http://localhost:25565` | Update server URL |
+| `mc-update.game-dir` | `.` | Minecraft game directory |
+| `mc-update.debug` | `false` | Show close button & keep window open |
+
+Example:
+```
+-javaagent:UpdateAgent.jar=server=http://192.168.1.100:25565,game-dir=C:\minecraft,debug=true
+```
+
+### Managed Paths
+
+Create an `update-config.json` in your data directory to control which files are synced:
 
 ```json
 {
@@ -70,181 +127,34 @@ Create `data/update-config.json` in the directory you'll mount as `/data`:
     "mods/",
     "config/",
     "resourcepacks/",
-    "shaderpacks/"
+    "options.txt"
   ]
 }
 ```
 
-Rules:
-- `mods/` — directory (trailing `/`), matches all files under it
-- `options.txt` — exact file match
-- `*` — all files (used when config is absent)
+- Paths ending with `/` match directories recursively.
+- Bare paths match exact files.
+- Use `["*"]` to include all files (default).
 
-### 3. Run Container
-
-```bash
-docker run -d \
-  --name mc-update \
-  -p 25565:25565 \
-  -v /path/to/your/data:/data \
-  mc-update-service
-```
-
-The container starts and auto-generates a default manifest (version `0`) if none exists.
-
-### 4. Generate Manifest
-
-After updating files in `/data/files/`, trigger manifest regeneration:
-
-```bash
-# Option A: docker exec
-docker exec mc-update python3 /app/generate_manifest.py "1.1"
-
-# Option B: HTTP API
-curl -X POST "http://<ip>:25565/api/generate?version=1.1"
-
-# Option C: Auto timestamp version
-docker exec mc-update python3 /app/generate_manifest.py
-```
-
-To protect the generate endpoint, set `GENERATE_TOKEN` env var:
-
-```bash
-docker run -d -e GENERATE_TOKEN=mysecret ...
-curl -X POST -H "X-Generate-Token: mysecret" "http://<ip>:25565/api/generate?version=1.1"
-```
-
-### 5. View Logs
-
-```bash
-docker logs -f mc-update
-```
-
-All logs go to stdout — no log files inside the container.
-
----
-
-## Client Setup (Java Agent)
-
-### 1. Build the Agent
-
-```bash
-# Windows
-cd 656-auto-update\agent
-build.bat
-
-# Linux / macOS
-cd 656-auto-update/agent
-chmod +x build.sh && ./build.sh
-```
-
-Requires JDK 8+. Output: `UpdateAgent.jar`.
-
-### 2. Add to Minecraft Launcher
-
-Add this JVM argument in your launcher (HMCL / PCL2 / Prism / official):
+## Project Structure
 
 ```
--javaagent:/path/to/UpdateAgent.jar=server=http://192.168.1.100:25565
+├── Dockerfile                  # Server Docker image
+├── LICENSE                     # MIT License
+├── server/
+│   ├── app.py                  # Flask API server
+│   ├── entrypoint.sh           # Container startup script
+│   ├── generate_manifest.py    # Manifest generation tool
+│   └── requirements.txt        # Python dependencies
+├── agent/
+│   ├── src/
+│   │   └── UpdateAgent.java    # Java agent source
+│   ├── META-INF/
+│   │   └── MANIFEST.MF         # JAR manifest
+│   ├── build.sh / build.bat    # Compilation scripts
+│   └── setup-agent.sh / .bat   # Installation scripts
 ```
 
-| Agent arg | System property | Default | Description |
-|-----------|----------------|---------|-------------|
-| `server` | `mc-update.server` | `http://localhost:25565` | Update server URL |
-| `game-dir` | `mc-update.game-dir` | `.minecraft` dir | Game directory |
-| `debug` | `mc-update.debug` | `false` | Keep window open after check |
+## License
 
-Multiple args separated by comma:
-
-```
--javaagent:UpdateAgent.jar=server=http://1.2.3.4:25565,game-dir=C:\mc,debug=true
-```
-
-### 3. Auto-Install Script (Optional)
-
-```bash
-# Linux
-./agent/setup-agent.sh ~/.minecraft http://192.168.1.100:25565
-
-# Windows
-agent\setup-agent.bat C:\Users\You\AppData\Roaming\.minecraft http://192.168.1.100:25565
-```
-
-This appends the `-javaagent` line to `user_jvm_args.txt`.
-
----
-
-## How It Works
-
-1. **Agent loads** before Minecraft via `premain()`
-2. **Blocks Minecraft launch** with `CountDownLatch`
-3. **GUI opens** showing server, game dir, progress bar, log panel
-4. **GET /api/version** → compare with local `.update_version`
-5. If different: **GET /api/manifest** → iterate files
-6. For each file: compare **SHA256** → download if missing or mismatched
-7. **Clean stale files** in managed directories (not in manifest → delete)
-8. **Release latch** → Minecraft launches with updated files
-9. Window auto-closes (or stays open in debug mode)
-
-### Debug Mode
-
-```
--javaagent:UpdateAgent.jar=server=...,debug=true
-```
-
-In debug mode, the window stays open after completion with a "Close" button, allowing log inspection.
-
----
-
-## API Reference
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/version` | `{"version":"1.0"}` |
-| GET | `/api/manifest` | `{"version":"1.0","managed_paths":[...],"files":[...]}` |
-| GET | `/api/files/<path>` | Download a resource file |
-| GET | `/api/config` | Server config (managed_paths) |
-| GET | `/api/health` | `{"status":"ok","manifest":true,"version":true}` |
-| POST | `/api/generate?version=1.0` | Trigger manifest regeneration |
-
----
-
-## Version Lifecycle
-
-```
-Manual update flow:
-  Edit files in /data/files/
-    → docker exec ... generate_manifest.py "1.1"
-      → Scans files, computes SHA256, writes manifest.json + version.txt
-        → Clients see new version → download updated files → done
-
-Client startup flow:
-  Launch Minecraft
-    → Agent checks /api/version
-      → Same as local? Launch immediately
-      → Different? Download manifest, compare hashes, download changed files
-        → Agent closes → Minecraft starts with updated files
-```
-
----
-
-## Files Managed by the Client
-
-The client only touches files listed in the manifest and within `managed_paths`:
-
-- Files **in** `managed_paths` but **not in manifest** → **deleted** (stale cleanup)
-- Files **in managed_paths** and **in manifest** → **hash-checked and updated**
-- Files **outside** `managed_paths` → **never touched** (e.g. saves, screenshots)
-
----
-
-## Troubleshooting
-
-| Symptom | Check |
-|---------|-------|
-| Agent window shows localhost | Set `server=` in agent args or `-Dmc-update.server=` |
-| "Manifest contains 0 files" | Check `jsonGetInt` fix; ensure manifest `size` is integer |
-| Download 404 | Path encoding; check special characters in filenames |
-| renameTo fails (Windows) | Agent now deletes target before rename |
-| Window closes too fast | Enable `debug=true` mode |
-| Can't connect to server | Check firewall, port mapping, container logs |
+MIT — See [LICENSE](./LICENSE) for details.
