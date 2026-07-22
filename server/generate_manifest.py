@@ -29,36 +29,71 @@ def compute_sha256(filepath):
 
 
 def load_update_config(out_dir):
-    """加载 update-config.json，返回 managed_paths 列表"""
+    """加载 update-config.json，返回 (managed_paths, excluded_paths) 元组"""
     config_path = os.path.join(out_dir, 'update-config.json')
     if not os.path.isfile(config_path):
         print(f"[update-service] WARNING: No update-config.json found at {config_path}")
         print("[update-service] Using default: scan all files (managed_paths=['*'])")
-        return ['*']
+        return ['*'], []
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
         paths = config.get('managed_paths', [])
+        excluded = config.get('excluded_paths', [])
         if not paths:
             print("[update-service] WARNING: managed_paths is empty, no files will be included")
-            return []
+            return [], excluded
         print(f"[update-service] Loaded config: {len(paths)} managed path(s)")
         for p in paths:
             print(f"  - {p}")
-        return paths
+        if excluded:
+            print(f"[update-service] Loaded config: {len(excluded)} excluded path(s)")
+            for p in excluded:
+                print(f"  - {p} (excluded)")
+        return paths, excluded
     except (json.JSONDecodeError, OSError) as e:
         print(f"[update-service] ERROR: Failed to load update-config.json: {e}", file=sys.stderr)
         sys.exit(1)
 
 
-def is_managed(relpath, managed_paths):
-    """判断文件是否匹配任一管理路径。
+def is_excluded(relpath, excluded_paths):
+    """判断文件是否匹配任一排除路径。
+
+    excluded_paths 中的条目可以是:
+      - 目录(以 / 结尾):  如 'configs/whitelist_example/'  排除该目录下所有文件
+      - 文件(不以 / 结尾): 如 'configs/secret.cfg'          精确排除该文件
+    """
+    if not excluded_paths:
+        return False
+    for ep in excluded_paths:
+        if ep.endswith('/'):
+            # 目录匹配：文件路径需以该目录开头
+            if relpath == ep[:-1] or relpath.startswith(ep):
+                return True
+        else:
+            # 精确文件匹配
+            if relpath == ep:
+                return True
+    return False
+
+
+def is_managed(relpath, managed_paths, excluded_paths=None):
+    """判断文件是否匹配任一管理路径且未被排除。
 
     managed_paths 中的条目可以是:
       - 目录(以 / 结尾):  如 'mods/'    匹配 'mods/xxx.jar'
       - 文件(不以 / 结尾): 如 'options.txt' 精确匹配
       - 通配符 '*' 匹配所有文件
+
+    如果同时匹配 excluded_paths 中的条目，则视为不管理。
     """
+    if excluded_paths is None:
+        excluded_paths = []
+
+    # 先检查是否被排除
+    if is_excluded(relpath, excluded_paths):
+        return False
+
     if '*' in managed_paths:
         return True
     for mp in managed_paths:
@@ -93,14 +128,17 @@ def sanitize_path(path):
         return sanitized
 
 
-def scan_files(files_dir, managed_paths):
-    """扫描目录下所有文件，只返回 managed_paths 中规定的文件"""
+def scan_files(files_dir, managed_paths, excluded_paths=None):
+    """扫描目录下所有文件，只返回 managed_paths 中规定且未被排除的文件"""
+    if excluded_paths is None:
+        excluded_paths = []
     if not os.path.isdir(files_dir):
         print(f"[update-service] ERROR: Directory not found: {files_dir}", file=sys.stderr)
         sys.exit(1)
 
     files = []
     skipped = 0
+    excluded_count = 0
     for root, dirnames, filenames in os.walk(files_dir):
         # 跳过隐藏目录
         dirnames[:] = [d for d in dirnames if not d.startswith('.')]
@@ -114,9 +152,12 @@ def scan_files(files_dir, managed_paths):
             # 清理非法 Unicode 代理字符
             relpath = sanitize_path(relpath)
 
-            # 检查是否为管理范围内的文件
-            if not is_managed(relpath, managed_paths):
-                skipped += 1
+            # 检查是否为管理范围内且未被排除的文件
+            if not is_managed(relpath, managed_paths, excluded_paths):
+                if is_excluded(relpath, excluded_paths):
+                    excluded_count += 1
+                else:
+                    skipped += 1
                 continue
 
             file_hash = compute_sha256(fpath)
@@ -129,6 +170,8 @@ def scan_files(files_dir, managed_paths):
 
     if skipped > 0:
         print(f"[update-service] Skipped {skipped} file(s) not in managed_paths")
+    if excluded_count > 0:
+        print(f"[update-service] Excluded {excluded_count} file(s) by excluded_paths")
     return files
 
 
@@ -154,16 +197,17 @@ def main():
     out_dir = args.out
     version = args.version or str(int(time.time()))
 
-    # 加载更新配置，确定管理范围
-    managed_paths = load_update_config(out_dir)
+    # 加载更新配置，确定管理范围和排除范围
+    managed_paths, excluded_paths = load_update_config(out_dir)
 
     print(f"[update-service] Scanning: {files_dir}")
-    files = scan_files(files_dir, managed_paths)
+    files = scan_files(files_dir, managed_paths, excluded_paths)
     print(f"[update-service] Found {len(files)} managed file(s)")
 
     manifest = {
         'version': version,
         'managed_paths': managed_paths,
+        'excluded_paths': excluded_paths,
         'files': files,
     }
 

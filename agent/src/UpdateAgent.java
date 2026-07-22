@@ -223,6 +223,13 @@ public class UpdateAgent {
                 log("Managed paths:");
                 for (String p : managedPaths) log("  - " + p);
 
+                String excludedArray = jsonGetArray(manifestJson, "excluded_paths");
+                List<String> excludedPaths = parseStringArray(excludedArray != null ? excludedArray : "");
+                if (!excludedPaths.isEmpty()) {
+                    log("Excluded paths:");
+                    for (String p : excludedPaths) log("  - " + p);
+                }
+
                 // 3. check and download each file
                 progressBar.setIndeterminate(false);
                 progressBar.setValue(0);
@@ -293,7 +300,7 @@ public class UpdateAgent {
 
                 // 4. clean stale files
                 log("Cleaning stale files...");
-                cleanStaleFiles(manifestFiles, managedPaths);
+                cleanStaleFiles(manifestFiles, managedPaths, excludedPaths);
 
                 // 5. done — update happened before Minecraft launch, no restart needed
                 final int finalUpdated = updated;
@@ -491,30 +498,73 @@ public class UpdateAgent {
         //  Cleanup
         // ═══════════════════════════════════════════════════════════
 
-        private void cleanStaleFiles(List<FileEntry> manifestFiles, List<String> managedPaths) {
+        private void cleanStaleFiles(List<FileEntry> manifestFiles, List<String> managedPaths,
+                                      List<String> excludedPaths) {
             Set<String> manifestSet = new HashSet<>();
             for (FileEntry e : manifestFiles) manifestSet.add(e.path);
             for (String mp : managedPaths) {
                 if (mp.equals("*")) continue;
                 if (mp.endsWith("/")) {
+                    // 目录路径：递归清理该目录
                     File dir = new File(gameDir, mp);
                     if (dir.isDirectory()) {
-                        deleteStaleInDir(dir, gameDir, manifestSet);
+                        deleteStaleInDir(dir, gameDir, manifestSet, excludedPaths);
+                    }
+                } else {
+                    // 精确文件路径：检查该文件是否在 manifest 中
+                    String normalizedPath = mp.replace('/', File.separatorChar);
+                    File file = new File(gameDir, normalizedPath);
+                    if (file.isFile() && !file.getName().startsWith(".")) {
+                        String rel = mp.replace('\\', '/');
+                        if (isExcluded(rel, excludedPaths)) {
+                            log("  [SKIP]  " + mp + " (excluded)");
+                            continue;
+                        }
+                        if (!manifestSet.contains(rel)) {
+                            log("  [DEL]   " + rel + " (not in manifest)");
+                            file.delete();
+                        }
                     }
                 }
             }
         }
 
-        private void deleteStaleInDir(File dir, String baseDir, Set<String> manifestSet) {
+        private boolean isExcluded(String relPath, List<String> excludedPaths) {
+            if (excludedPaths == null || excludedPaths.isEmpty()) return false;
+            for (String ep : excludedPaths) {
+                if (ep.equals("*")) continue;
+                if (ep.endsWith("/")) {
+                    // 目录排除：路径以该目录开头则排除
+                    if (relPath.equals(ep.substring(0, ep.length() - 1))
+                            || relPath.startsWith(ep)) {
+                        return true;
+                    }
+                } else {
+                    // 精确文件排除
+                    if (relPath.equals(ep)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        private void deleteStaleInDir(File dir, String baseDir, Set<String> manifestSet,
+                                       List<String> excludedPaths) {
             File[] children = dir.listFiles();
             if (children == null) return;
             for (File child : children) {
                 if (child.isDirectory()) {
-                    deleteStaleInDir(child, baseDir, manifestSet);
+                    deleteStaleInDir(child, baseDir, manifestSet, excludedPaths);
                 } else if (child.isFile() && !child.getName().startsWith(".")) {
                     String rel = child.getAbsolutePath()
                             .substring(new File(baseDir).getAbsolutePath().length() + 1)
                             .replace('\\', '/');
+                    // 检查是否在排除列表中
+                    if (isExcluded(rel, excludedPaths)) {
+                        log("  [SKIP]  " + rel + " (excluded)");
+                        continue;
+                    }
                     if (!manifestSet.contains(rel)) {
                         log("  [DEL]   " + rel + " (not in manifest)");
                         child.delete();

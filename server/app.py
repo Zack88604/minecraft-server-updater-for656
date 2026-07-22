@@ -116,15 +116,16 @@ def api_download(filepath):
 
 @app.route('/api/config', methods=['GET'])
 def api_config():
-    """返回更新配置（managed_paths 等）"""
+    """返回更新配置（managed_paths, excluded_paths 等）"""
     if not os.path.isfile(CONFIG_PATH):
         # 如果配置文件不存在，从 manifest 中读取（兼容旧 manifest）
         manifest = _load_manifest()
         if manifest:
             return jsonify({
                 'managed_paths': manifest.get('managed_paths', ['*']),
+                'excluded_paths': manifest.get('excluded_paths', []),
             })
-        return jsonify({'managed_paths': ['*']})
+        return jsonify({'managed_paths': ['*'], 'excluded_paths': []})
     try:
         with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
             config = json.load(f)
