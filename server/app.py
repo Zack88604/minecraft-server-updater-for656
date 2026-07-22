@@ -18,7 +18,6 @@ DATA_DIR = os.environ.get('DATA_DIR', '/data')
 FILES_DIR = os.path.join(DATA_DIR, 'files')
 LOGS_DIR = os.path.join(DATA_DIR, 'logs')
 MANIFEST_PATH = os.path.join(DATA_DIR, 'manifest.json')
-VERSION_PATH = os.path.join(DATA_DIR, 'version.txt')
 CONFIG_PATH = os.path.join(DATA_DIR, 'update-config.json')
 
 app = Flask(__name__)
@@ -60,30 +59,9 @@ def _load_manifest():
         return None
 
 
-def _load_version():
-    """加载 version.txt，若不存在则返回 None"""
-    if not os.path.isfile(VERSION_PATH):
-        return None
-    try:
-        with open(VERSION_PATH, 'r', encoding='utf-8') as f:
-            return f.read().strip()
-    except OSError as e:
-        logger.error(f"Failed to load version: {e}")
-        return None
-
-
 # ═══════════════════════════════════════════════════════════════════
 #  API 端点
 # ═══════════════════════════════════════════════════════════════════
-
-@app.route('/api/version', methods=['GET'])
-def api_version():
-    """返回当前版本号"""
-    version = _load_version()
-    if version is None:
-        return jsonify({'error': 'version not available'}), 503
-    return jsonify({'version': version})
-
 
 @app.route('/api/manifest', methods=['GET'])
 def api_manifest():
@@ -146,15 +124,12 @@ def api_generate():
             logger.warning("Generate attempt with invalid token")
             return jsonify({'error': 'unauthorized'}), 401
 
-    version = request.args.get('version', None)
     cmd = [sys.executable, '/app/generate_manifest.py',
            '--dir', FILES_DIR, '--out', DATA_DIR]
-    if version:
-        cmd.append(version)
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        logger.info(f"Generate manifest: version={version or 'auto'}")
+        logger.info("Generate manifest")
         if result.returncode != 0:
             logger.error(f"Generate failed: {result.stderr}")
             return jsonify({
@@ -176,12 +151,10 @@ def api_generate():
 def api_health():
     """健康检查"""
     manifest_ok = _load_manifest() is not None
-    version_ok = _load_version() is not None
-    status = 200 if (manifest_ok and version_ok) else 503
+    status = 200 if manifest_ok else 503
     return jsonify({
         'status': 'ok' if status == 200 else 'degraded',
         'manifest': manifest_ok,
-        'version': version_ok,
     }), status
 
 
@@ -199,11 +172,10 @@ if __name__ == '__main__':
     logger.info(f"Files directory: {FILES_DIR}")
 
     # 启动前检查数据完整性
-    version = _load_version()
     manifest = _load_manifest()
-    if version is None or manifest is None:
-        logger.warning("Manifest or version not found. Run 'generate-manifest' first.")
+    if manifest is None:
+        logger.warning("Manifest not found. Run 'generate-manifest' first.")
     else:
-        logger.info(f"Current version: {version}, files count: {len(manifest.get('files', []))}")
+        logger.info(f"Manifest loaded, files count: {len(manifest.get('files', []))}")
 
     app.run(host=host, port=port, debug=debug)

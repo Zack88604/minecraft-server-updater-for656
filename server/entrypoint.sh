@@ -11,14 +11,13 @@ export STARTUP_TS
 mkdir -p /data/logs
 echo "[update-service] Log file: /data/logs/${STARTUP_TS}.log"
 
-# 如果 manifest 或 version 不存在，自动生成一个默认清单（版本号为 "0"）
-if [ ! -f /data/manifest.json ] || [ ! -f /data/version.txt ]; then
-    echo "[update-service] WARNING: No manifest found. Generating default manifest (version=0)..."
-    python3 /app/generate_manifest.py "0" --dir /data/files --out /data
+# 如果 manifest 不存在，自动生成一个默认清单
+if [ ! -f /data/manifest.json ]; then
+    echo "[update-service] WARNING: No manifest found. Generating default manifest..."
+    python3 /app/generate_manifest.py --dir /data/files --out /data
 fi
 
 echo "[update-service] Starting update service..."
-echo "[update-service] Version: $(cat /data/version.txt)"
 echo "[update-service] Files:   $(python3 -c "import json; d=json.load(open('/data/manifest.json')); print(len(d.get('files',[])))")"
 
 # 启动 Flask API 服务

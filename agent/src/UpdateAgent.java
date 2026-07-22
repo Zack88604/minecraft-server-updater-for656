@@ -182,31 +182,8 @@ public class UpdateAgent {
                 log("Server:   " + serverUrl);
                 log("Game dir: " + gameDir);
 
-                // 1. check version
+                // 1. fetch manifest
                 setStatus("Checking for updates...", true);
-                log("Fetching remote version...");
-                String versionJson = httpGet(serverUrl + "/api/version");
-                String remoteVersion = jsonGetString(versionJson, "version");
-                if (remoteVersion == null) {
-                    showError("Cannot get remote version");
-                    return;
-                }
-                log("Remote version: " + remoteVersion);
-
-                String localVersion = readLocalVersion();
-                log("Local version:  " + (localVersion.isEmpty() ? "<none>" : localVersion));
-
-                if (remoteVersion.equals(localVersion)) {
-                    SwingUtilities.invokeLater(() -> {
-                        setStatus("Already up to date, launching Minecraft...", false);
-                        progressBar.setIndeterminate(false);
-                        progressBar.setValue(100);
-                        autoClose(800);
-                    });
-                    return;
-                }
-
-                // 2. fetch manifest
                 log("Fetching manifest...");
                 String manifestJson = httpGet(serverUrl + "/api/manifest");
                 String filesArray = jsonGetArray(manifestJson, "files");
@@ -230,7 +207,7 @@ public class UpdateAgent {
                     for (String p : excludedPaths) log("  - " + p);
                 }
 
-                // 3. check and download each file
+                // 2. check and download each file
                 progressBar.setIndeterminate(false);
                 progressBar.setValue(0);
                 int total = manifestFiles.size();
@@ -298,15 +275,14 @@ public class UpdateAgent {
                     progressBar.setValue(total > 0 ? checked * 95 / total : 100);
                 }
 
-                // 4. clean stale files
+                // 3. clean stale files
                 log("Cleaning stale files...");
                 cleanStaleFiles(manifestFiles, managedPaths, excludedPaths);
 
-                // 5. done — update happened before Minecraft launch, no restart needed
+                // 4. done — update happened before Minecraft launch, no restart needed
                 final int finalUpdated = updated;
                 final int finalFailed = failed;
                 progressBar.setValue(100);
-                writeLocalVersion(remoteVersion);
 
                 if (finalFailed > 0) {
                     SwingUtilities.invokeLater(() -> {
@@ -404,23 +380,6 @@ public class UpdateAgent {
             } catch (Exception e) {
                 return "";
             }
-        }
-
-        private String readLocalVersion() {
-            File f = new File(gameDir, ".update_version");
-            if (!f.isFile()) return "";
-            try (BufferedReader r = new BufferedReader(new FileReader(f))) {
-                return r.readLine().trim();
-            } catch (IOException e) {
-                return "";
-            }
-        }
-
-        private void writeLocalVersion(String version) {
-            File f = new File(gameDir, ".update_version");
-            try (FileWriter w = new FileWriter(f)) {
-                w.write(version);
-            } catch (IOException ignored) {}
         }
 
         // ═══════════════════════════════════════════════════════════

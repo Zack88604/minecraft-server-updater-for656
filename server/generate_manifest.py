@@ -14,7 +14,6 @@ import sys
 import os
 import json
 import hashlib
-import time
 import argparse
 
 
@@ -180,22 +179,17 @@ def main():
         description='Minecraft 自动更新服务 - 资源清单生成工具'
     )
     parser.add_argument(
-        'version', nargs='?', default=None,
-        help='版本号（默认使用当前 Unix 时间戳）'
-    )
-    parser.add_argument(
         '--dir', default=os.environ.get('FILES_DIR', '/data/files'),
         help='要扫描的资源目录（默认 /data/files）'
     )
     parser.add_argument(
         '--out', default=os.environ.get('DATA_DIR', '/data'),
-        help='manifest.json 和 version.txt 的输出目录（默认 /data）'
+        help='manifest.json 的输出目录（默认 /data）'
     )
     args = parser.parse_args()
 
     files_dir = args.dir
     out_dir = args.out
-    version = args.version or str(int(time.time()))
 
     # 加载更新配置，确定管理范围和排除范围
     managed_paths, excluded_paths = load_update_config(out_dir)
@@ -205,7 +199,6 @@ def main():
     print(f"[update-service] Found {len(files)} managed file(s)")
 
     manifest = {
-        'version': version,
         'managed_paths': managed_paths,
         'excluded_paths': excluded_paths,
         'files': files,
@@ -217,13 +210,7 @@ def main():
         json.dump(manifest, mf, indent=2, ensure_ascii=True)
     print(f"[update-service] Manifest written: {manifest_path}")
 
-    # 写入 version.txt
-    version_path = os.path.join(out_dir, 'version.txt')
-    with open(version_path, 'w', encoding='utf-8') as vf:
-        vf.write(version + '\n')
-    print(f"[update-service] Version written: {version_path}")
-
-    print(f"[update-service] Done! version={version}, files={len(files)}")
+    print(f"[update-service] Done! files={len(files)}")
 
 
 if __name__ == '__main__':
