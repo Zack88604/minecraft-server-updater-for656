@@ -22,13 +22,49 @@ CONFIG_PATH = os.path.join(DATA_DIR, 'update-config.json')
 
 app = Flask(__name__)
 
-# ── 日志配置：stdout + 文件持久化 ──────────────────────────────────
+# ── 日志配置：所有控制台输出同步写入日志文件 ──────────────────────
 STARTUP_TS = os.environ.get('STARTUP_TS', 'unknown')
 LOG_FILE = os.path.join(LOGS_DIR, f'{STARTUP_TS}.log')
 
 # 确保日志目录存在
 os.makedirs(LOGS_DIR, exist_ok=True)
 
+# 保存原始 stdout/stderr（用于控制台真实输出）
+_original_stdout = sys.stdout
+_original_stderr = sys.stderr
+
+# 打开日志文件（行缓冲模式，每条写入立即刷盘）
+_log_fh = open(LOG_FILE, 'a', encoding='utf-8', buffering=1)
+
+
+class _TeeWriter:
+    """同时写入原始流和日志文件的包装器 — 所有 console 输出都会被记录"""
+
+    def __init__(self, original, log_fh):
+        self._original = original
+        self._log_fh = log_fh
+
+    def write(self, message):
+        self._original.write(message)
+        self._log_fh.write(message)
+
+    def flush(self):
+        self._original.flush()
+        self._log_fh.flush()
+
+    def isatty(self):
+        return self._original.isatty()
+
+    def fileno(self):
+        return self._original.fileno()
+
+
+# 重定向 stdout/stderr：print()、subprocess 输出、Flask/Werkzeug 日志
+# 等所有控制台内容都会同步写入日志文件
+sys.stdout = _TeeWriter(_original_stdout, _log_fh)
+sys.stderr = _TeeWriter(_original_stderr, _log_fh)
+
+# 配置 logger（StreamHandler 输出到重定向后的 stdout，会同时到达控制台和日志文件）
 logger = logging.getLogger('update-service')
 logger.setLevel(logging.INFO)
 formatter = logging.Formatter(
@@ -36,15 +72,9 @@ formatter = logging.Formatter(
     datefmt='%Y-%m-%d %H:%M:%S',
 )
 
-# stdout handler
 stream_handler = logging.StreamHandler(sys.stdout)
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
-
-# file handler
-file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
 
 
 def _load_manifest():
@@ -129,9 +159,12 @@ def api_generate():
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        logger.info("Generate manifest")
+        logger.info("Generate manifest triggered via API")
+        if result.stdout:
+            logger.info("Generate stdout:\n%s", result.stdout.rstrip())
         if result.returncode != 0:
-            logger.error(f"Generate failed: {result.stderr}")
+            if result.stderr:
+                logger.error("Generate stderr:\n%s", result.stderr.rstrip())
             return jsonify({
                 'status': 'error',
                 'output': result.stdout,
