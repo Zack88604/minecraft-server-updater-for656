@@ -98,6 +98,20 @@ public class UpdateAgent {
         private final JTextArea  logArea     = new JTextArea(8, 50);
         private final JButton    btnClose    = new JButton("Close");
 
+        // Per-file download progress bar (below overall bar)
+        private final JProgressBar dlProgressBar = new JProgressBar(0, 100);
+        private final JLabel       lblDlSpeed    = new JLabel(" ");
+
+        // Download tracking — written by worker thread, read by Swing Timer on EDT
+        private volatile long dlTotalBytes      = 0;
+        private volatile long dlDownloadedBytes = 0;
+        private volatile boolean dlActive       = false;
+
+        // Per-file download UI refresh timer (500ms)
+        private final javax.swing.Timer dlRefreshTimer = new javax.swing.Timer(500, e -> refreshDownloadUI());
+        private long dlLastBytes = 0;
+        private long dlLastTime  = 0;
+
         private String gameDir;
         private String serverUrl;
         private final CountDownLatch latch;
@@ -120,7 +134,7 @@ public class UpdateAgent {
         private void initUI() {
             setTitle("Minecraft Update Check");
             setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
-            setSize(520, 380);
+            setSize(520, 420);
             setLocationRelativeTo(null);
             setResizable(false);
 
@@ -142,12 +156,35 @@ public class UpdateAgent {
             topPanel.add(new JLabel("Game dir: " + gameDir));
             root.add(topPanel, BorderLayout.NORTH);
 
-            // Center: progress bar + log
+            // Center: progress area + log
             JPanel center = new JPanel(new BorderLayout(6, 6));
+
+            // Progress panel: status + overall bar + per-file bar + speed
+            JPanel progressPanel = new JPanel();
+            progressPanel.setLayout(new BoxLayout(progressPanel, BoxLayout.Y_AXIS));
+
             progressBar.setIndeterminate(true);
             progressBar.setStringPainted(true);
-            center.add(lblStatus, BorderLayout.NORTH);
-            center.add(progressBar, BorderLayout.CENTER);
+            progressBar.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+            dlProgressBar.setStringPainted(true);
+            dlProgressBar.setValue(0);
+            dlProgressBar.setString("");
+            dlProgressBar.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+            lblDlSpeed.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+            lblDlSpeed.setForeground(new Color(120, 120, 120));
+            lblDlSpeed.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+            progressPanel.add(lblStatus);
+            progressPanel.add(Box.createVerticalStrut(4));
+            progressPanel.add(progressBar);
+            progressPanel.add(Box.createVerticalStrut(2));
+            progressPanel.add(dlProgressBar);
+            progressPanel.add(Box.createVerticalStrut(2));
+            progressPanel.add(lblDlSpeed);
+
+            center.add(progressPanel, BorderLayout.NORTH);
 
             logArea.setEditable(false);
             logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
@@ -155,7 +192,7 @@ public class UpdateAgent {
             logArea.setForeground(new Color(200, 200, 200));
             JScrollPane scroll = new JScrollPane(logArea);
             scroll.setBorder(BorderFactory.createTitledBorder("Update log"));
-            center.add(scroll, BorderLayout.SOUTH);
+            center.add(scroll, BorderLayout.CENTER);
             root.add(center, BorderLayout.CENTER);
 
             // Close button (only shown in debug mode; otherwise window auto-closes)
@@ -171,9 +208,50 @@ public class UpdateAgent {
             }
         }
 
+        // ── Per-file download UI refresh ──────────────────────────
+
+        private void refreshDownloadUI() {
+            if (!dlActive) {
+                dlProgressBar.setValue(0);
+                dlProgressBar.setString("");
+                lblDlSpeed.setText(" ");
+                return;
+            }
+            long total = dlTotalBytes;
+            long done  = dlDownloadedBytes;
+            if (total > 0) {
+                int pct = (int) (done * 100 / total);
+                if (pct > 100) pct = 100;
+                dlProgressBar.setValue(pct);
+                dlProgressBar.setString(pct + "%");
+                dlProgressBar.setIndeterminate(false);
+            } else {
+                dlProgressBar.setIndeterminate(true);
+                dlProgressBar.setString("");
+            }
+            long now = System.currentTimeMillis();
+            long elapsed = now - dlLastTime;
+            if (elapsed >= 400) {
+                long bytesDelta = done - dlLastBytes;
+                double speed = elapsed > 0 ? bytesDelta * 1000.0 / elapsed : 0;
+                lblDlSpeed.setText(formatSpeed(speed));
+                dlLastBytes = done;
+                dlLastTime  = now;
+            }
+        }
+
+        private static String formatSpeed(double bytesPerSec) {
+            if (bytesPerSec < 0) bytesPerSec = 0;
+            if (bytesPerSec >= 1_000_000_000) return String.format("%.1f GB/s", bytesPerSec / 1_000_000_000);
+            if (bytesPerSec >= 1_000_000)     return String.format("%.1f MB/s", bytesPerSec / 1_000_000);
+            if (bytesPerSec >= 1_000)         return String.format("%.0f KB/s", bytesPerSec / 1_000);
+            return String.format("%.0f B/s", bytesPerSec);
+        }
+
         // ── update flow (pure Java HTTP, no external scripts) ─────
 
         private void startUpdate() {
+            dlRefreshTimer.start();
             new Thread(this::doUpdate, "mc-update-worker").start();
         }
 
@@ -243,16 +321,28 @@ public class UpdateAgent {
                         if (parent != null && !parent.isDirectory()) parent.mkdirs();
                         File tmpFile = new File(localFile.getPath() + ".tmp");
 
+                        // Track per-file download progress
+                        dlTotalBytes = entry.size;
+                        dlDownloadedBytes = 0;
+                        dlActive = true;
+                        dlLastBytes = 0;
+                        dlLastTime = System.currentTimeMillis();
+                        long dlStart = dlLastTime;
+
                         // URL-encode each path segment for the download URL
                         String encodedPath = encodePath(relPath);
                         boolean ok = httpDownload(serverUrl + "/api/files/" + encodedPath, tmpFile);
+                        dlActive = false;
+
                         if (ok) {
                             String dlHash = sha256(tmpFile);
                             if (dlHash.equals(entry.hash)) {
                                 // delete target first (Windows renameTo does not overwrite)
                                 if (localFile.exists()) localFile.delete();
                                 if (tmpFile.renameTo(localFile)) {
-                                    log("         -> Done (" + entry.size + " bytes)");
+                                    long dlElapsed = System.currentTimeMillis() - dlStart;
+                                    double avgSpeed = dlElapsed > 0 ? entry.size * 1000.0 / dlElapsed : 0;
+                                    log("         -> Done (" + entry.size + " bytes, " + formatSpeed(avgSpeed) + ")");
                                     updated++;
                                 } else {
                                     log("  [FAIL]  " + relPath + ": cannot move file");
@@ -269,6 +359,13 @@ public class UpdateAgent {
                             tmpFile.delete();
                             failed++;
                         }
+
+                        // Reset per-file progress bar immediately
+                        SwingUtilities.invokeLater(() -> {
+                            dlProgressBar.setValue(0);
+                            dlProgressBar.setString("");
+                            lblDlSpeed.setText(" ");
+                        });
                     }
 
                     setStatus("Checked: " + checked + "/" + total, false);
@@ -280,6 +377,7 @@ public class UpdateAgent {
                 cleanStaleFiles(manifestFiles, managedPaths, excludedPaths);
 
                 // 4. done — update happened before Minecraft launch, no restart needed
+                dlRefreshTimer.stop();
                 final int finalUpdated = updated;
                 final int finalFailed = failed;
                 progressBar.setValue(100);
@@ -302,6 +400,7 @@ public class UpdateAgent {
                 }
 
             } catch (Exception e) {
+                dlRefreshTimer.stop();
                 showError("Update error: " + e.getMessage());
                 e.printStackTrace();
                 latch.countDown();
@@ -349,11 +448,17 @@ public class UpdateAgent {
                 conn.setRequestMethod("GET");
                 conn.setConnectTimeout(10000);
                 conn.setReadTimeout(60000);
+                // Use Content-Length from server if available (more accurate)
+                int contentLength = conn.getContentLength();
+                if (contentLength > 0) dlTotalBytes = contentLength;
                 try (InputStream in = conn.getInputStream();
                      FileOutputStream out = new FileOutputStream(dest)) {
                     byte[] buf = new byte[8192];
                     int n;
-                    while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+                    while ((n = in.read(buf)) != -1) {
+                        out.write(buf, 0, n);
+                        dlDownloadedBytes += n;
+                    }
                 } finally {
                     conn.disconnect();
                 }
@@ -578,7 +683,11 @@ public class UpdateAgent {
         }
 
         private void showError(String msg) {
+            dlRefreshTimer.stop();
             SwingUtilities.invokeLater(() -> {
+                dlProgressBar.setValue(0);
+                dlProgressBar.setString("");
+                lblDlSpeed.setText(" ");
                 log("[ERROR] " + msg);
                 setStatus("Update failed", false);
                 progressBar.setIndeterminate(false);
