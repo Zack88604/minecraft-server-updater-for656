@@ -13,7 +13,7 @@ OUTPUT_JAR="$SCRIPT_DIR/UpdateAgent.jar"
 
 echo "[build] Compiling UpdateAgent.java..."
 mkdir -p "$BUILD_DIR"
-javac -d "$BUILD_DIR" "$SRC_DIR/UpdateAgent.java"
+javac -d "$BUILD_DIR" "$SRC_DIR/UpdateAgent.java" "$SRC_DIR/ReplaceHelper.java"
 
 echo "[build] Packaging into JAR..."
 cd "$BUILD_DIR"

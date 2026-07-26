@@ -16,7 +16,7 @@ RUN apk add --no-cache python3 py3-flask
 COPY 656-auto-update/server/ /app/
 
 # 创建数据目录结构
-RUN mkdir -p /data/files
+RUN mkdir -p /data/files /data/agent
 
 # 赋予 entrypoint 执行权限
 RUN chmod +x /app/entrypoint.sh

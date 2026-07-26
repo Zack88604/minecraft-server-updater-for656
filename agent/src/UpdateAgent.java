@@ -22,6 +22,7 @@ import java.io.*;
 import java.lang.instrument.Instrumentation;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -32,6 +33,8 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 
 public class UpdateAgent {
 
@@ -84,6 +87,18 @@ public class UpdateAgent {
             latch.await();  // block until update check completes
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    // ── Utility: get own JAR path ──────────────────────────────
+
+    private static String getMyJarPath() {
+        try {
+            String path = UpdateAgent.class.getProtectionDomain()
+                    .getCodeSource().getLocation().getPath();
+            return URLDecoder.decode(path, "UTF-8");
+        } catch (Exception e) {
+            return null;
         }
     }
 
@@ -264,6 +279,10 @@ public class UpdateAgent {
                 setStatus("Checking for updates...", true);
                 log("Fetching manifest...");
                 String manifestJson = httpGet(serverUrl + "/api/manifest");
+
+                // 0. self-update check — must happen before regular file sync
+                checkSelfUpdate(manifestJson);
+
                 String filesArray = jsonGetArray(manifestJson, "files");
                 if (filesArray == null) {
                     showError("Cannot parse manifest");
@@ -508,6 +527,33 @@ public class UpdateAgent {
             return defaultVal;
         }
 
+        /** Extract a long integer value for a key */
+        private static long jsonGetLong(String json, String key, long defaultVal) {
+            Pattern p = Pattern.compile("\"" + key + "\"\\s*:\\s*(-?\\d+)");
+            Matcher m = p.matcher(json);
+            if (m.find()) {
+                try { return Long.parseLong(m.group(1)); }
+                catch (NumberFormatException ignored) {}
+            }
+            return defaultVal;
+        }
+
+        /** Extract a JSON object value for a key (e.g. "agent": {...}) */
+        private static String jsonGetObject(String json, String key) {
+            int k = json.indexOf("\"" + key + "\"");
+            if (k < 0) return null;
+            int start = json.indexOf('{', k);
+            if (start < 0) return null;
+            int depth = 1, i = start + 1;
+            while (i < json.length() && depth > 0) {
+                char c = json.charAt(i);
+                if (c == '{') depth++;
+                else if (c == '}') depth--;
+                i++;
+            }
+            return json.substring(start, i);
+        }
+
         private static String jsonGetArray(String json, String key) {
             int k = json.indexOf("\"" + key + "\"");
             if (k < 0) return null;
@@ -663,6 +709,142 @@ public class UpdateAgent {
             final int size;
             FileEntry(String path, String hash, int size) {
                 this.path = path; this.hash = hash; this.size = size;
+            }
+        }
+
+        // ── Self-update ─────────────────────────────────────────
+
+        /** Check manifest for agent update; download if newer; schedule post-exit replace. */
+        private void checkSelfUpdate(String manifestJson) {
+            String agentObj = jsonGetObject(manifestJson, "agent");
+            if (agentObj == null) {
+                log("  [SKIP]  No agent info in manifest");
+                return;
+            }
+            String agentHash = jsonGetString(agentObj, "hash");
+            long agentSize = jsonGetLong(agentObj, "size", -1);
+            if (agentHash == null || agentSize <= 0) {
+                log("  [SKIP]  Incomplete agent info in manifest");
+                return;
+            }
+
+            String myJarPath = getMyJarPath();
+            if (myJarPath == null) {
+                log("  [SKIP]  Cannot determine agent JAR path");
+                return;
+            }
+
+            File myJar = new File(myJarPath);
+            if (!myJar.isFile()) {
+                log("  [SKIP]  Agent JAR not found at: " + myJarPath);
+                return;
+            }
+
+            log("Checking agent update...");
+            log("  My path:    " + myJarPath);
+            String myHash = sha256(myJar);
+            if (myHash.equals(agentHash)) {
+                log("  [OK]    Agent is up to date");
+                return;
+            }
+
+            log("  [UPDATE] New agent version available!");
+            log("  Remote: " + agentHash);
+            log("  Local:  " + myHash);
+            setStatus("Downloading agent update...", false);
+
+            File newJar = new File(myJarPath + ".new");
+            if (newJar.exists()) newJar.delete();
+
+            dlTotalBytes = agentSize;
+            dlDownloadedBytes = 0;
+            dlActive = true;
+            dlLastBytes = 0;
+            dlLastTime = System.currentTimeMillis();
+
+            boolean ok = httpDownload(serverUrl + "/api/agent", newJar);
+            dlActive = false;
+            SwingUtilities.invokeLater(() -> {
+                dlProgressBar.setValue(0);
+                dlProgressBar.setString("");
+                lblDlSpeed.setText(" ");
+            });
+
+            if (!ok) {
+                log("  [FAIL]  Agent download failed");
+                newJar.delete();
+                return;
+            }
+
+            String dlHash = sha256(newJar);
+            if (!dlHash.equals(agentHash)) {
+                log("  [FAIL]  Agent hash mismatch after download");
+                newJar.delete();
+                return;
+            }
+
+            log("  [OK]    Agent downloaded, will replace on next restart");
+            scheduleSelfReplace(myJarPath, newJar.getAbsolutePath());
+        }
+
+        /** Register a shutdown hook that extracts a helper class from our own JAR and
+         *  spawns a detached Java process to replace the agent JAR after JVM exit.
+         *  This avoids cmd.exe / batch scripts that may trigger antivirus on Windows. */
+        private void scheduleSelfReplace(String oldJarPath, String newJarPath) {
+            try {
+                // Extract ReplaceHelper.class from our own JAR into a temp dir
+                File tempDir = new File(System.getProperty("java.io.tmpdir"), "mc-update-helper");
+                if (!tempDir.isDirectory()) tempDir.mkdirs();
+                extractReplaceHelper(oldJarPath, tempDir);
+
+                // Find java executable from the same JRE that is running us
+                String javaHome = System.getProperty("java.home");
+                boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+                String javaExe = javaHome + File.separator + "bin" + File.separator
+                        + (isWindows ? "java.exe" : "java");
+
+                // On Windows, prefer javaw.exe (no console window) if available
+                if (isWindows) {
+                    File javawExe = new File(javaHome + File.separator + "bin" + File.separator
+                            + "javaw.exe");
+                    if (javawExe.isFile()) javaExe = javawExe.getAbsolutePath();
+                }
+
+                String[] cmd = new String[]{
+                        javaExe, "-cp", tempDir.getAbsolutePath(),
+                        "ReplaceHelper", oldJarPath, newJarPath
+                };
+
+                Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                    try {
+                        new ProcessBuilder(cmd).inheritIO().start();
+                    } catch (IOException ignored) {}
+                }, "mc-agent-replace-hook"));
+
+                log("  [INFO]  Replace scheduled via: " + javaExe);
+            } catch (Exception e) {
+                log("  [WARN]  Failed to schedule agent replacement: " + e.getMessage());
+            }
+        }
+
+        /** Extract ReplaceHelper.class from our JAR into tempDir so it can run independently
+         *  (reading from a JAR that is about to be replaced would fail on Windows). */
+        private void extractReplaceHelper(String jarPath, File tempDir) {
+            try (JarFile jar = new JarFile(jarPath)) {
+                JarEntry entry = jar.getJarEntry("ReplaceHelper.class");
+                if (entry == null) {
+                    log("  [WARN]  ReplaceHelper.class not found in JAR");
+                    return;
+                }
+                File outFile = new File(tempDir, "ReplaceHelper.class");
+                try (InputStream in = jar.getInputStream(entry);
+                     FileOutputStream out = new FileOutputStream(outFile)) {
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+                }
+            } catch (IOException e) {
+                log("  [WARN]  Cannot extract ReplaceHelper: " + e.getMessage());
             }
         }
 

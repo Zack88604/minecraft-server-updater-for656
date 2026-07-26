@@ -13,7 +13,7 @@ set "OUTPUT_JAR=%SCRIPT_DIR%UpdateAgent.jar"
 
 echo [build] Compiling UpdateAgent.java...
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
-javac -d "%BUILD_DIR%" "%SRC_DIR%\UpdateAgent.java"
+javac -d "%BUILD_DIR%" "%SRC_DIR%\UpdateAgent.java" "%SRC_DIR%\ReplaceHelper.java"
 if %ERRORLEVEL% neq 0 (
     echo [build] Compilation failed!
     exit /b 1

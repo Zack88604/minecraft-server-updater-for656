@@ -17,6 +17,7 @@ from flask import Flask, jsonify, send_file, abort, request
 DATA_DIR = os.environ.get('DATA_DIR', '/data')
 FILES_DIR = os.path.join(DATA_DIR, 'files')
 LOGS_DIR = os.path.join(DATA_DIR, 'logs')
+AGENT_DIR = os.path.join(DATA_DIR, 'agent')
 MANIFEST_PATH = os.path.join(DATA_DIR, 'manifest.json')
 CONFIG_PATH = os.path.join(DATA_DIR, 'update-config.json')
 
@@ -122,6 +123,17 @@ def api_download(filepath):
     return send_file(full_path, mimetype=mimetype, as_attachment=False)
 
 
+@app.route('/api/agent', methods=['GET'])
+def api_agent():
+    """下载最新版 UpdateAgent.jar（用于自更新）"""
+    agent_jar = os.path.join(AGENT_DIR, 'UpdateAgent.jar')
+    if not os.path.isfile(agent_jar):
+        logger.warning("Agent JAR not found")
+        abort(404)
+    logger.info("Agent download")
+    return send_file(agent_jar, mimetype='application/java-archive', as_attachment=False)
+
+
 @app.route('/api/config', methods=['GET'])
 def api_config():
     """返回更新配置（managed_paths, excluded_paths 等）"""
@@ -156,6 +168,11 @@ def api_generate():
 
     cmd = [sys.executable, '/app/generate_manifest.py',
            '--dir', FILES_DIR, '--out', DATA_DIR]
+
+    # 如果存在 agent JAR，一并记录到 manifest（用于客户端自更新）
+    agent_jar = os.path.join(AGENT_DIR, 'UpdateAgent.jar')
+    if os.path.isfile(agent_jar):
+        cmd.extend(['--agent-jar', agent_jar])
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -203,6 +220,7 @@ if __name__ == '__main__':
     logger.info(f"Starting update service on {host}:{port}")
     logger.info(f"Data directory: {DATA_DIR}")
     logger.info(f"Files directory: {FILES_DIR}")
+    logger.info(f"Agent directory: {AGENT_DIR}")
 
     # 启动前检查数据完整性
     manifest = _load_manifest()

@@ -186,6 +186,10 @@ def main():
         '--out', default=os.environ.get('DATA_DIR', '/data'),
         help='manifest.json 的输出目录（默认 /data）'
     )
+    parser.add_argument(
+        '--agent-jar', default=None,
+        help='UpdateAgent.jar 路径（可选，用于记录自更新信息到 manifest）'
+    )
     args = parser.parse_args()
 
     files_dir = args.dir
@@ -203,6 +207,19 @@ def main():
         'excluded_paths': excluded_paths,
         'files': files,
     }
+
+    # 如果指定了 agent JAR，附加 agent 自更新信息
+    if args.agent_jar and os.path.isfile(args.agent_jar):
+        agent_hash = compute_sha256(args.agent_jar)
+        agent_size = os.path.getsize(args.agent_jar)
+        manifest['agent'] = {
+            'path': 'UpdateAgent.jar',
+            'hash': agent_hash,
+            'size': agent_size,
+        }
+        print(f"[update-service] Agent info added (hash={agent_hash}, size={agent_size})")
+    elif args.agent_jar:
+        print(f"[update-service] WARNING: --agent-jar specified but file not found: {args.agent_jar}")
 
     # 写入 manifest.json
     manifest_path = os.path.join(out_dir, 'manifest.json')
