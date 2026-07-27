@@ -615,13 +615,13 @@ public class UpdateAgent {
             for (String mp : managedPaths) {
                 if (mp.equals("*")) continue;
                 if (mp.endsWith("/")) {
-                    // 目录路径：递归清理该目录
+                    // Directory path: recursively clean this directory
                     File dir = new File(gameDir, mp);
                     if (dir.isDirectory()) {
                         deleteStaleInDir(dir, gameDir, manifestSet, excludedPaths);
                     }
                 } else {
-                    // 精确文件路径：检查该文件是否在 manifest 中
+                    // Exact file path: check if this file is in manifest
                     String normalizedPath = mp.replace('/', File.separatorChar);
                     File file = new File(gameDir, normalizedPath);
                     if (file.isFile() && !file.getName().startsWith(".")) {
@@ -644,13 +644,13 @@ public class UpdateAgent {
             for (String ep : excludedPaths) {
                 if (ep.equals("*")) continue;
                 if (ep.endsWith("/")) {
-                    // 目录排除：路径以该目录开头则排除
+                    // Directory exclusion: path starting with this prefix is excluded
                     if (relPath.equals(ep.substring(0, ep.length() - 1))
                             || relPath.startsWith(ep)) {
                         return true;
                     }
                 } else {
-                    // 精确文件排除
+                    // Exact file exclusion
                     if (relPath.equals(ep)) {
                         return true;
                     }
@@ -670,7 +670,7 @@ public class UpdateAgent {
                     String rel = child.getAbsolutePath()
                             .substring(new File(baseDir).getAbsolutePath().length() + 1)
                             .replace('\\', '/');
-                    // 检查是否在排除列表中
+                    // Check if excluded
                     if (isExcluded(rel, excludedPaths)) {
                         log("  [SKIP]  " + rel + " (excluded)");
                         continue;

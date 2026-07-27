@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Minecraft 自动更新服务 - 资源清单生成工具
-由人工在更新资源后手动运行，扫描文件目录并生成 manifest.json 和 version.txt
+Minecraft Auto-Update Service - Manifest Generator
+Run manually after updating resources to scan the file directory and generate
+manifest.json.
 
-用法:
-    python generate_manifest.py [版本号] [--dir <资源目录>] [--out <输出目录>]
+Usage:
+    python generate_manifest.py [--dir <files_dir>] [--out <output_dir>]
 
-    若不指定版本号，则自动使用当前 Unix 时间戳。
-    资源目录默认 /data/files，输出目录默认 /data。
+    Default files dir: /data/files, output dir: /data.
 """
 
 import sys
@@ -18,17 +18,17 @@ import argparse
 
 
 def compute_sha256(filepath):
-    """计算文件的 SHA256 哈希值"""
+    """Compute the SHA-256 hash of a file."""
     h = hashlib.sha256()
     with open(filepath, 'rb') as f:
-        # 分块读取，避免大文件占用过多内存
+        # Read in chunks to avoid loading large files into memory
         for chunk in iter(lambda: f.read(8192), b''):
             h.update(chunk)
     return h.hexdigest()
 
 
 def load_update_config(out_dir):
-    """加载 update-config.json，返回 (managed_paths, excluded_paths) 元组"""
+    """Load update-config.json; return (managed_paths, excluded_paths) tuple."""
     config_path = os.path.join(out_dir, 'update-config.json')
     if not os.path.isfile(config_path):
         print(f"[update-service] WARNING: No update-config.json found at {config_path}")
@@ -56,40 +56,40 @@ def load_update_config(out_dir):
 
 
 def is_excluded(relpath, excluded_paths):
-    """判断文件是否匹配任一排除路径。
+    """Check if a file matches any excluded path.
 
-    excluded_paths 中的条目可以是:
-      - 目录(以 / 结尾):  如 'configs/whitelist_example/'  排除该目录下所有文件
-      - 文件(不以 / 结尾): 如 'configs/secret.cfg'          精确排除该文件
+    excluded_paths entries can be:
+      - Directory (ends with /):  e.g. 'configs/whitelist_example/'  excludes all files under it
+      - File (no trailing /):     e.g. 'configs/secret.cfg'          exact file exclusion
     """
     if not excluded_paths:
         return False
     for ep in excluded_paths:
         if ep.endswith('/'):
-            # 目录匹配：文件路径需以该目录开头
+            # Directory match: relpath must start with this prefix
             if relpath == ep[:-1] or relpath.startswith(ep):
                 return True
         else:
-            # 精确文件匹配
+            # Exact file match
             if relpath == ep:
                 return True
     return False
 
 
 def is_managed(relpath, managed_paths, excluded_paths=None):
-    """判断文件是否匹配任一管理路径且未被排除。
+    """Check if a file matches any managed path and is not excluded.
 
-    managed_paths 中的条目可以是:
-      - 目录(以 / 结尾):  如 'mods/'    匹配 'mods/xxx.jar'
-      - 文件(不以 / 结尾): 如 'options.txt' 精确匹配
-      - 通配符 '*' 匹配所有文件
+    managed_paths entries can be:
+      - Directory (ends with /):  e.g. 'mods/'       matches 'mods/xxx.jar'
+      - File (no trailing /):     e.g. 'options.txt' exact match
+      - Wildcard '*' matches all files
 
-    如果同时匹配 excluded_paths 中的条目，则视为不管理。
+    A file matching excluded_paths is treated as unmanaged.
     """
     if excluded_paths is None:
         excluded_paths = []
 
-    # 先检查是否被排除
+    # Check exclusion first
     if is_excluded(relpath, excluded_paths):
         return False
 
@@ -97,24 +97,24 @@ def is_managed(relpath, managed_paths, excluded_paths=None):
         return True
     for mp in managed_paths:
         if mp.endswith('/'):
-            # 目录匹配：文件路径需以该目录开头
+            # Directory match: relpath must start with this prefix
             if relpath == mp[:-1] or relpath.startswith(mp):
                 return True
         else:
-            # 精确文件匹配
+            # Exact file match
             if relpath == mp:
                 return True
     return False
 
 
 def sanitize_path(path):
-    """清理路径中的非法 Unicode 字符（如 lone surrogate），替换为 ?"""
+    """Sanitize illegal Unicode characters (e.g. lone surrogates), replace with ?."""
     try:
-        # 尝试编码为 UTF-8：lone surrogate 会导致错误
+        # Try encoding as UTF-8: lone surrogates cause errors
         path.encode('utf-8')
         return path
     except UnicodeEncodeError:
-        # 逐个字符处理，替换无法编码的字符
+        # Process character by character, replacing unencodable ones
         result = []
         for ch in path:
             try:
@@ -128,7 +128,7 @@ def sanitize_path(path):
 
 
 def scan_files(files_dir, managed_paths, excluded_paths=None):
-    """扫描目录下所有文件，只返回 managed_paths 中规定且未被排除的文件"""
+    """Scan directory recursively; return only files within managed_paths and not excluded."""
     if excluded_paths is None:
         excluded_paths = []
     if not os.path.isdir(files_dir):
@@ -139,19 +139,19 @@ def scan_files(files_dir, managed_paths, excluded_paths=None):
     skipped = 0
     excluded_count = 0
     for root, dirnames, filenames in os.walk(files_dir):
-        # 跳过隐藏目录
+        # Skip hidden directories
         dirnames[:] = [d for d in dirnames if not d.startswith('.')]
         for fname in sorted(filenames):
             if fname.startswith('.'):
                 continue
             fpath = os.path.join(root, fname)
             relpath = os.path.relpath(fpath, files_dir)
-            # 统一使用正斜杠作为路径分隔符
+            # Normalize to forward-slash path separators
             relpath = relpath.replace(os.sep, '/')
-            # 清理非法 Unicode 代理字符
+            # Sanitize illegal Unicode surrogate characters
             relpath = sanitize_path(relpath)
 
-            # 检查是否为管理范围内且未被排除的文件
+            # Check if within managed scope and not excluded
             if not is_managed(relpath, managed_paths, excluded_paths):
                 if is_excluded(relpath, excluded_paths):
                     excluded_count += 1
@@ -176,26 +176,26 @@ def scan_files(files_dir, managed_paths, excluded_paths=None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Minecraft 自动更新服务 - 资源清单生成工具'
+        description='Minecraft Auto-Update Service - Manifest Generator'
     )
     parser.add_argument(
         '--dir', default=os.environ.get('FILES_DIR', '/data/files'),
-        help='要扫描的资源目录（默认 /data/files）'
+        help='Directory to scan (default /data/files)'
     )
     parser.add_argument(
         '--out', default=os.environ.get('DATA_DIR', '/data'),
-        help='manifest.json 的输出目录（默认 /data）'
+        help='Output directory for manifest.json (default /data)'
     )
     parser.add_argument(
         '--agent-jar', default=None,
-        help='UpdateAgent.jar 路径（可选，用于记录自更新信息到 manifest）'
+        help='Path to UpdateAgent.jar (optional, records self-update info in manifest)'
     )
     args = parser.parse_args()
 
     files_dir = args.dir
     out_dir = args.out
 
-    # 加载更新配置，确定管理范围和排除范围
+    # Load update config to determine managed/excluded scope
     managed_paths, excluded_paths = load_update_config(out_dir)
 
     print(f"[update-service] Scanning: {files_dir}")
@@ -208,7 +208,7 @@ def main():
         'files': files,
     }
 
-    # 如果指定了 agent JAR，附加 agent 自更新信息
+    # If --agent-jar specified, attach agent self-update info
     if args.agent_jar and os.path.isfile(args.agent_jar):
         agent_hash = compute_sha256(args.agent_jar)
         agent_size = os.path.getsize(args.agent_jar)
@@ -221,7 +221,7 @@ def main():
     elif args.agent_jar:
         print(f"[update-service] WARNING: --agent-jar specified but file not found: {args.agent_jar}")
 
-    # 写入 manifest.json
+    # Write manifest.json
     manifest_path = os.path.join(out_dir, 'manifest.json')
     with open(manifest_path, 'w', encoding='utf-8') as mf:
         json.dump(manifest, mf, indent=2, ensure_ascii=True)

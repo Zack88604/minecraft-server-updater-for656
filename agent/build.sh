@@ -1,7 +1,7 @@
 #!/bin/bash
-# ── Minecraft 客户端更新 Java Agent 编译脚本 (Linux/macOS) ────────
-# 用法: ./build.sh
-# 输出: UpdateAgent.jar
+# ── Minecraft Client Update Java Agent Build Script (Linux/macOS) ──
+# Usage: ./build.sh
+# Output: UpdateAgent.jar
 # ──────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -21,5 +21,5 @@ jar cfm "$OUTPUT_JAR" "$SCRIPT_DIR/META-INF/MANIFEST.MF" *.class
 
 echo "[build] Done! Created: $OUTPUT_JAR"
 
-# 清理临时 class 文件
+# Clean up temp class files
 rm -rf "$BUILD_DIR"

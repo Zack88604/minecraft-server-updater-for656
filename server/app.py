@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Minecraft 自动更新服务 - HTTP API 服务器
-提供版本查询、资源清单查询、文件下载等接口
+Minecraft Auto-Update Service - HTTP API Server
+Provides manifest queries, file downloads, and more.
 """
 
 import os
@@ -13,7 +13,7 @@ import subprocess
 
 from flask import Flask, jsonify, send_file, abort, request
 
-# 配置
+# Configuration
 DATA_DIR = os.environ.get('DATA_DIR', '/data')
 FILES_DIR = os.path.join(DATA_DIR, 'files')
 LOGS_DIR = os.path.join(DATA_DIR, 'logs')
@@ -23,23 +23,23 @@ CONFIG_PATH = os.path.join(DATA_DIR, 'update-config.json')
 
 app = Flask(__name__)
 
-# ── 日志配置：所有控制台输出同步写入日志文件 ──────────────────────
+# ── Logging: tee all console output to log file ──────────────────
 STARTUP_TS = os.environ.get('STARTUP_TS', 'unknown')
 LOG_FILE = os.path.join(LOGS_DIR, f'{STARTUP_TS}.log')
 
-# 确保日志目录存在
+# Ensure log directory exists
 os.makedirs(LOGS_DIR, exist_ok=True)
 
-# 保存原始 stdout/stderr（用于控制台真实输出）
+# Save original stdout/stderr for console output
 _original_stdout = sys.stdout
 _original_stderr = sys.stderr
 
-# 打开日志文件（行缓冲模式，每条写入立即刷盘）
+# Open log file (line-buffered, each write flushed immediately)
 _log_fh = open(LOG_FILE, 'a', encoding='utf-8', buffering=1)
 
 
 class _TeeWriter:
-    """同时写入原始流和日志文件的包装器 — 所有 console 输出都会被记录"""
+    """Tee writer: writes to both the original stream and the log file."""
 
     def __init__(self, original, log_fh):
         self._original = original
@@ -60,12 +60,12 @@ class _TeeWriter:
         return self._original.fileno()
 
 
-# 重定向 stdout/stderr：print()、subprocess 输出、Flask/Werkzeug 日志
-# 等所有控制台内容都会同步写入日志文件
+# Redirect stdout/stderr so print(), subprocess output, Flask/Werkzeug logs
+# all go to both console and the log file.
 sys.stdout = _TeeWriter(_original_stdout, _log_fh)
 sys.stderr = _TeeWriter(_original_stderr, _log_fh)
 
-# 配置 logger（StreamHandler 输出到重定向后的 stdout，会同时到达控制台和日志文件）
+# Configure logger (StreamHandler writes to redirected stdout, reaching both console and file)
 logger = logging.getLogger('update-service')
 logger.setLevel(logging.INFO)
 formatter = logging.Formatter(
@@ -79,7 +79,7 @@ logger.addHandler(stream_handler)
 
 
 def _load_manifest():
-    """加载 manifest.json，若不存在则返回 None"""
+    """Load manifest.json; return None if not available."""
     if not os.path.isfile(MANIFEST_PATH):
         return None
     try:
@@ -91,12 +91,12 @@ def _load_manifest():
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  API 端点
+#  API Endpoints
 # ═══════════════════════════════════════════════════════════════════
 
 @app.route('/api/manifest', methods=['GET'])
 def api_manifest():
-    """返回完整的资源清单（包含所有文件路径、hash、大小）"""
+    """Return the full file manifest (paths, hashes, sizes)."""
     manifest = _load_manifest()
     if manifest is None:
         return jsonify({'error': 'manifest not available'}), 503
@@ -105,11 +105,11 @@ def api_manifest():
 
 @app.route('/api/files/<path:filepath>', methods=['GET'])
 def api_download(filepath):
-    """下载单个资源文件"""
+    """Download a single resource file."""
     safe_path = os.path.normpath(filepath).lstrip('/')
     full_path = os.path.join(FILES_DIR, safe_path)
 
-    # 确保路径没有逃逸到 FILES_DIR 之外
+    # Prevent path traversal outside FILES_DIR
     if not os.path.realpath(full_path).startswith(os.path.realpath(FILES_DIR)):
         logger.warning(f"Path traversal attempt: {filepath}")
         abort(403)
@@ -125,7 +125,7 @@ def api_download(filepath):
 
 @app.route('/api/agent', methods=['GET'])
 def api_agent():
-    """下载最新版 UpdateAgent.jar（用于自更新）"""
+    """Download the latest UpdateAgent.jar (for self-update)."""
     agent_jar = os.path.join(AGENT_DIR, 'UpdateAgent.jar')
     if not os.path.isfile(agent_jar):
         logger.warning("Agent JAR not found")
@@ -136,9 +136,9 @@ def api_agent():
 
 @app.route('/api/config', methods=['GET'])
 def api_config():
-    """返回更新配置（managed_paths, excluded_paths 等）"""
+    """Return update configuration (managed_paths, excluded_paths, etc.)."""
     if not os.path.isfile(CONFIG_PATH):
-        # 如果配置文件不存在，从 manifest 中读取（兼容旧 manifest）
+        # Fall back to manifest if config file does not exist (backward compat)
         manifest = _load_manifest()
         if manifest:
             return jsonify({
@@ -157,8 +157,8 @@ def api_config():
 
 @app.route('/api/generate', methods=['POST'])
 def api_generate():
-    """通过 HTTP 触发生成 manifest（无需 docker exec）"""
-    # 简单的 token 保护，防止随意触发
+    """Trigger manifest generation via HTTP (no docker exec needed)."""
+    # Simple token protection against unauthorized triggers
     token = os.environ.get('GENERATE_TOKEN', '')
     if token:
         req_token = request.headers.get('X-Generate-Token', '')
@@ -169,7 +169,7 @@ def api_generate():
     cmd = [sys.executable, '/app/generate_manifest.py',
            '--dir', FILES_DIR, '--out', DATA_DIR]
 
-    # 如果存在 agent JAR，一并记录到 manifest（用于客户端自更新）
+    # Attach agent JAR info if present, for client self-update
     agent_jar = os.path.join(AGENT_DIR, 'UpdateAgent.jar')
     if os.path.isfile(agent_jar):
         cmd.extend(['--agent-jar', agent_jar])
@@ -199,7 +199,7 @@ def api_generate():
 
 @app.route('/api/health', methods=['GET'])
 def api_health():
-    """健康检查"""
+    """Health check."""
     manifest_ok = _load_manifest() is not None
     status = 200 if manifest_ok else 503
     return jsonify({
@@ -209,7 +209,7 @@ def api_health():
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  启动入口
+#  Entry Point
 # ═══════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
@@ -222,7 +222,7 @@ if __name__ == '__main__':
     logger.info(f"Files directory: {FILES_DIR}")
     logger.info(f"Agent directory: {AGENT_DIR}")
 
-    # 启动前检查数据完整性
+    # Pre-start integrity check
     manifest = _load_manifest()
     if manifest is None:
         logger.warning("Manifest not found. Run 'generate-manifest' first.")

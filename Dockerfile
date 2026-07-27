@@ -1,31 +1,31 @@
-# ── Minecraft 自动更新服务 Docker 镜像 ────────────────────────────
-# 构建（在项目根目录执行）：
+# ── Minecraft Auto-Update Service Docker Image ────────────────────
+# Build (run from project root):
 #   docker build -t mc-update-service -f 656-auto-update/Dockerfile .
-# 运行：
+# Run:
 #   docker run -d -p 25565:25565 -v /path/to/files:/data/files --name mc-update mc-update-service
-# 生成清单：
+# Generate manifest:
 #   docker exec mc-update python3 /app/generate_manifest.py "1.0" --dir /data/files --out /data
 # ──────────────────────────────────────────────────────────────────
 
 FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/gcr.io/iguazio/alpine:3.20
 
-# 安装 Python 3 和 Flask（通过 apk 安装，避免 PEP 668 限制）
+# Install Python 3 and Flask (via apk to avoid PEP 668 restrictions)
 RUN apk add --no-cache python3 py3-flask
 
-# 复制服务端代码
+# Copy server code
 COPY 656-auto-update/server/ /app/
 
-# 创建数据目录结构
+# Create data directory structure
 RUN mkdir -p /data/files /data/agent
 
-# 赋予 entrypoint 执行权限
+# Make entrypoint executable
 RUN chmod +x /app/entrypoint.sh
 
-# 开放端口（服务端默认 25565，与 Minecraft 默认端口一致便于记忆）
+# Expose port (default 25565, matching Minecraft default for easy recall)
 EXPOSE 25565
 
-# 设置工作目录
+# Set working directory
 WORKDIR /data
 
-# 容器启动入口
+# Container entrypoint
 ENTRYPOINT ["/app/entrypoint.sh"]

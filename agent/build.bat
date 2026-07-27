@@ -1,8 +1,8 @@
 @echo off
 chcp 65001 >nul
-REM ── Minecraft 客户端更新 Java Agent 编译脚本 (Windows) ──────────
-REM 用法: build.bat
-REM 输出: UpdateAgent.jar
+REM ── Minecraft Client Update Java Agent Build Script (Windows) ────
+REM Usage: build.bat
+REM Output: UpdateAgent.jar
 REM ──────────────────────────────────────────────────────────────────
 
 setlocal
@@ -29,6 +29,6 @@ if %ERRORLEVEL% neq 0 (
 
 echo [build] Done! Created: %OUTPUT_JAR%
 
-REM 清理临时文件
+REM Clean up temp files
 rmdir /s /q "%BUILD_DIR%" 2>nul
 endlocal
