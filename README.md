@@ -41,9 +41,11 @@ The setup script appends `-javaagent:UpdateAgent.jar=server=...,game-dir=...` to
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/manifest` | GET | Full file manifest (paths, SHA-256, sizes) |
+| `/api/v2/manifest` | GET | Full file manifest (paths, SHA-256, sizes) |
+| `/api/manifest` | GET | **Deprecated** — returns `410 Gone`; upgrade client to `/api/v2/manifest` |
 | `/api/files/<path>` | GET | Download a resource file |
-| `/api/config` | GET | Managed paths configuration |
+| `/api/agent` | GET | Download the latest `UpdateAgent.jar` |
+| `/api/config` | GET | Managed paths & excluded paths configuration |
 | `/api/generate` | POST | Regenerate manifest (token-protected) |
 | `/api/health` | GET | Health check |
 
@@ -61,11 +63,24 @@ The setup script appends `-javaagent:UpdateAgent.jar=server=...,game-dir=...` to
 
 | Property | Default | Description |
 |----------|---------|-------------|
-| `mc-update.server` | `http://localhost:25565` | Server URL |
+| `mc-update.server` | `http://localhost:25565` | Server URL(s) — comma-separated for **multi-source fallback** |
 | `mc-update.game-dir` | `.` | Minecraft directory |
 | `mc-update.debug` | `false` | Keep GUI open after sync |
 
-Example: `-javaagent:UpdateAgent.jar=server=http://1.2.3.4:25565,game-dir=C:\mc,debug=true`
+**Single server:**
+```
+-javaagent:UpdateAgent.jar=server=http://1.2.3.4:25565,game-dir=C:\mc,debug=true
+```
+
+**Multi-server fallback** (automatically tries next server on failure):
+```
+-javaagent:UpdateAgent.jar=server=http://cdn1.example.com:25565,http://cdn2.example.com:8443
+```
+
+Or via `mc-update.properties` in the game directory:
+```properties
+server=http://cdn1.example.com:25565,http://cdn2.example.com:8443
+```
 
 ### Selective Sync (`update-config.json`)
 

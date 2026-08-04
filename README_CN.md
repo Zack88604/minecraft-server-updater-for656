@@ -41,9 +41,11 @@ cd agent
 
 | 端点 | 方法 | 描述 |
 |------|------|------|
-| `/api/manifest` | GET | 完整文件清单（路径、SHA-256、大小） |
+| `/api/v2/manifest` | GET | 完整文件清单（路径、SHA-256、大小） |
+| `/api/manifest` | GET | **已废弃** — 返回 `410 Gone`；请升级客户端至 `/api/v2/manifest` |
 | `/api/files/<path>` | GET | 下载指定资源文件 |
-| `/api/config` | GET | 管理路径配置 |
+| `/api/agent` | GET | 下载最新 `UpdateAgent.jar` |
+| `/api/config` | GET | 管理路径与排除路径配置 |
 | `/api/generate` | POST | 重新生成清单（Token 保护） |
 | `/api/health` | GET | 健康检查 |
 
@@ -61,11 +63,24 @@ cd agent
 
 | 属性 | 默认值 | 描述 |
 |------|--------|------|
-| `mc-update.server` | `http://localhost:25565` | 服务器地址 |
+| `mc-update.server` | `http://localhost:25565` | 服务器地址 — 支持**逗号分隔多源**，自动故障转移 |
 | `mc-update.game-dir` | `.` | Minecraft 目录 |
 | `mc-update.debug` | `false` | 同步完成后保持窗口打开 |
 
-示例：`-javaagent:UpdateAgent.jar=server=http://1.2.3.4:25565,game-dir=C:\mc,debug=true`
+**单服务器：**
+```
+-javaagent:UpdateAgent.jar=server=http://1.2.3.4:25565,game-dir=C:\mc,debug=true
+```
+
+**多源故障转移**（某源不可用时自动切换）：
+```
+-javaagent:UpdateAgent.jar=server=http://cdn1.example.com:25565,http://cdn2.example.com:8443
+```
+
+或通过游戏目录下的 `mc-update.properties` 配置：
+```properties
+server=http://cdn1.example.com:25565,http://cdn2.example.com:8443
+```
 
 ### 选择性同步 (`update-config.json`)
 

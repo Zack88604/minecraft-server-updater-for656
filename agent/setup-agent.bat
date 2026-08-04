@@ -1,17 +1,14 @@
 @echo off
 chcp 65001 >nul
 REM ── Minecraft Client Auto-Update Agent Setup Script (Windows) ────
-REM Appends -javaagent configuration to Minecraft client JVM arguments.
+REM Creates mc-update.properties in the instance directory and appends
+REM a minimal -javaagent JVM argument (no inline parameters).
 REM
 REM Usage:
 REM   setup-agent.bat <minecraft-instance-dir> [update-server-url]
 REM
 REM Example:
 REM   setup-agent.bat C:\Users\You\AppData\Roaming\.minecraft http://192.168.1.100:25565
-REM
-REM This script appends the -javaagent argument to user_jvm_args.txt
-REM (or vmoptions file) inside the instance directory.
-REM If the file does not exist, it will be created.
 REM ──────────────────────────────────────────────────────────────────
 
 setlocal enabledelayedexpansion
@@ -35,7 +32,13 @@ if not exist "%AGENT_JAR%" (
     exit /b 1
 )
 
-REM Find JVM arguments file
+REM ---- Write persistent config file ----
+set CONFIG_FILE=%INSTANCE_DIR%\mc-update.properties
+echo # Minecraft Update Agent Configuration> "%CONFIG_FILE%"
+echo server=%SERVER_URL%>> "%CONFIG_FILE%"
+echo [setup] Config written: %CONFIG_FILE%
+
+REM ---- Add -javaagent JVM argument (JAR path only, no inline params) ----
 set JVM_ARGS_FILE=
 if exist "%INSTANCE_DIR%\user_jvm_args.txt" (
     set JVM_ARGS_FILE=%INSTANCE_DIR%\user_jvm_args.txt
@@ -46,14 +49,13 @@ if exist "%INSTANCE_DIR%\user_jvm_args.txt" (
     type nul > "%JVM_ARGS_FILE%" 2>nul
 )
 
-set AGENT_ARG=-javaagent:%AGENT_JAR%=server=%SERVER_URL%
+set AGENT_ARG=-javaagent:%AGENT_JAR%
 
 REM Check if already configured
 findstr /C:"UpdateAgent" "%JVM_ARGS_FILE%" >nul 2>&1
 if !ERRORLEVEL! equ 0 (
     echo [setup] Agent already configured in %JVM_ARGS_FILE%
-    echo [setup] To update, edit the line manually:
-    echo        %AGENT_ARG%
+    echo [setup] To update config, edit: %CONFIG_FILE%
 ) else (
     echo %AGENT_ARG%>> "%JVM_ARGS_FILE%"
     echo [setup] Added agent to %JVM_ARGS_FILE%
@@ -61,6 +63,7 @@ if !ERRORLEVEL! equ 0 (
 
 echo [setup] Done!
 echo [setup] Agent JAR: %AGENT_JAR%
+echo [setup] Config:    %CONFIG_FILE%
 echo [setup] Server:    %SERVER_URL%
 echo.
 echo Next time you launch Minecraft, updates will be checked automatically.

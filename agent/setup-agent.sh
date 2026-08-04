@@ -1,16 +1,13 @@
 #!/bin/bash
 # ── Minecraft Client Auto-Update Agent Setup Script (Linux/macOS) ──
-# Appends -javaagent configuration to Minecraft client JVM arguments.
+# Creates mc-update.properties in the instance directory and appends
+# a minimal -javaagent JVM argument (no inline parameters).
 #
 # Usage:
 #   setup-agent.sh <minecraft-instance-dir> [update-server-url]
 #
 # Example:
 #   setup-agent.sh ~/.minecraft http://192.168.1.100:25565
-#
-# This script appends the -javaagent argument to user_jvm_args.txt
-# (or vmoptions file) inside the instance directory.
-# If the file does not exist, it will be created.
 # ──────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -33,25 +30,31 @@ if [ ! -f "$AGENT_JAR" ]; then
     exit 1
 fi
 
-# Find JVM arguments file
+# ---- Write persistent config file ----
+CONFIG_FILE="$INSTANCE_DIR/mc-update.properties"
+cat > "$CONFIG_FILE" << EOF
+# Minecraft Update Agent Configuration
+server=$SERVER_URL
+EOF
+echo "[setup] Config written: $CONFIG_FILE"
+
+# ---- Add -javaagent JVM argument (JAR path only, no inline params) ----
 JVM_ARGS_FILE=""
 if [ -f "$INSTANCE_DIR/user_jvm_args.txt" ]; then
     JVM_ARGS_FILE="$INSTANCE_DIR/user_jvm_args.txt"
 elif [ -f "$INSTANCE_DIR/options.txt" ]; then
     JVM_ARGS_FILE="$INSTANCE_DIR/options.txt"
 else
-    # Create user_jvm_args.txt if missing
     JVM_ARGS_FILE="$INSTANCE_DIR/user_jvm_args.txt"
     touch "$JVM_ARGS_FILE"
 fi
 
-AGENT_ARG="-javaagent:${AGENT_JAR}=server=${SERVER_URL}"
+AGENT_ARG="-javaagent:${AGENT_JAR}"
 
 # Check if already configured
 if grep -q "UpdateAgent" "$JVM_ARGS_FILE" 2>/dev/null; then
     echo "[setup] Agent already configured in $JVM_ARGS_FILE"
-    echo "[setup] To update, edit the line manually:"
-    echo "       $AGENT_ARG"
+    echo "[setup] To update config, edit: $CONFIG_FILE"
 else
     echo "$AGENT_ARG" >> "$JVM_ARGS_FILE"
     echo "[setup] Added agent to $JVM_ARGS_FILE"
@@ -59,6 +62,7 @@ fi
 
 echo "[setup] Done!"
 echo "[setup] Agent JAR: $AGENT_JAR"
+echo "[setup] Config:    $CONFIG_FILE"
 echo "[setup] Server:    $SERVER_URL"
 echo ""
 echo "Next time you launch Minecraft, updates will be checked automatically."

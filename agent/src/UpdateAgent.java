@@ -28,7 +28,10 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.regex.Matcher;
@@ -41,41 +44,66 @@ public class UpdateAgent {
     private static final String PROP_SERVER  = "mc-update.server";
     private static final String PROP_GAME_DIR = "mc-update.game-dir";
     private static final String PROP_DEBUG    = "mc-update.debug";
+    private static final String CONFIG_FILE   = "mc-update.properties";
+    private static final String DEFAULT_SERVER = "http://localhost:25565";
 
     // ── Agent entry point ────────────────────────────────────────
 
     public static void premain(String args, Instrumentation inst) {
-        boolean debug = false;
+        // 1. Parse agent args into a map (don't set system properties yet)
+        Map<String, String> agentArgs = parseAgentArgs(args);
+        boolean admin = "true".equalsIgnoreCase(agentArgs.get("admin"));
 
-        // Parse key=value pairs from -javaagent args (comma-separated)
-        // e.g. -javaagent:UpdateAgent.jar=server=http://1.2.3.4:25565,game-dir=C:\mc,debug=true
-        if (args != null && !args.isEmpty()) {
-            for (String token : args.split(",")) {
-                String[] kv = token.split("=", 2);
-                if (kv.length == 2) {
-                    String key = kv[0].trim();
-                    String value = kv[1].trim();
-                    switch (key) {
-                        case "server":
-                            System.setProperty(PROP_SERVER, value);
-                            break;
-                        case "game-dir":
-                            System.setProperty(PROP_GAME_DIR, value);
-                            break;
-                        case "debug":
-                            debug = "true".equalsIgnoreCase(value) || "1".equals(value);
-                            break;
-                    }
-                    if (key.equals(PROP_SERVER)) System.setProperty(PROP_SERVER, value);
-                    if (key.equals(PROP_GAME_DIR)) System.setProperty(PROP_GAME_DIR, value);
-                }
-            }
+        // 2. Resolve game directory: agent arg > -D system property > user.dir
+        String gameDir = coalesce(
+            agentArgs.get("game-dir"),
+            System.getProperty(PROP_GAME_DIR),
+            System.getProperty("user.dir", ".")
+        );
+        System.setProperty(PROP_GAME_DIR, gameDir);
+
+        // 3. Load persistent config from game directory
+        Properties fileConfig = loadConfigFile(new File(gameDir));
+
+        // 4. Merge config with mode-dependent priority
+        //    Normal:  file config > agent args > -D system props > defaults
+        //    Admin:   agent args  > -D system props > file config  > defaults (original)
+        String server;
+        boolean debug;
+
+        if (admin) {
+            server = coalesce(
+                agentArgs.get("server"),
+                System.getProperty(PROP_SERVER),
+                fileConfig.getProperty("server"),
+                DEFAULT_SERVER
+            );
+            String debugStr = coalesce(
+                agentArgs.get("debug"),
+                System.getProperty(PROP_DEBUG),
+                fileConfig.getProperty("debug"),
+                "false"
+            );
+            debug = "true".equalsIgnoreCase(debugStr) || "1".equals(debugStr);
+        } else {
+            server = coalesce(
+                fileConfig.getProperty("server"),
+                agentArgs.get("server"),
+                System.getProperty(PROP_SERVER),
+                DEFAULT_SERVER
+            );
+            String debugStr = coalesce(
+                fileConfig.getProperty("debug"),
+                agentArgs.get("debug"),
+                System.getProperty(PROP_DEBUG),
+                "false"
+            );
+            debug = "true".equalsIgnoreCase(debugStr) || "1".equals(debugStr);
         }
 
-        // Also check system property for debug
-        if (!debug) {
-            String dbg = System.getProperty(PROP_DEBUG);
-            debug = "true".equalsIgnoreCase(dbg) || "1".equals(dbg);
+        System.setProperty(PROP_SERVER, server);
+        if (debug) {
+            System.setProperty(PROP_DEBUG, "true");
         }
 
         // Block premain until update check finishes, then allow Minecraft to start
@@ -88,6 +116,46 @@ public class UpdateAgent {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    // ── Agent args parser ─────────────────────────────────────
+
+    /** Parse comma-separated key=value pairs from -javaagent args. Never returns null. */
+    private static Map<String, String> parseAgentArgs(String args) {
+        Map<String, String> map = new LinkedHashMap<>();
+        if (args != null && !args.isEmpty()) {
+            for (String token : args.split(",")) {
+                String[] kv = token.split("=", 2);
+                if (kv.length == 2) {
+                    map.put(kv[0].trim(), kv[1].trim());
+                }
+            }
+        }
+        return map;
+    }
+
+    // ── Value coalescing ──────────────────────────────────────
+
+    /** Return the first non-null, non-empty value from the given candidates. */
+    private static String coalesce(String... values) {
+        for (String v : values) {
+            if (v != null && !v.isEmpty()) return v;
+        }
+        return null;
+    }
+
+    // ── Persistent config file ─────────────────────────────────
+
+    /** Load mc-update.properties from the given directory. Never returns null. */
+    static Properties loadConfigFile(File dir) {
+        Properties props = new Properties();
+        File configFile = new File(dir, CONFIG_FILE);
+        if (configFile.isFile()) {
+            try (FileInputStream fis = new FileInputStream(configFile)) {
+                props.load(fis);
+            } catch (IOException ignored) {}
+        }
+        return props;
     }
 
     // ── Utility: get own JAR path ──────────────────────────────
@@ -128,7 +196,8 @@ public class UpdateAgent {
         private long dlLastTime  = 0;
 
         private String gameDir;
-        private String serverUrl;
+        private List<String> serverUrls;
+        private int currentServerIndex = 0;
         private final CountDownLatch latch;
         private final boolean debug;
 
@@ -142,8 +211,60 @@ public class UpdateAgent {
         }
 
         private void initConfig() {
-            serverUrl = System.getProperty(PROP_SERVER, "http://localhost:25565");
-            gameDir   = System.getProperty(PROP_GAME_DIR, System.getProperty("user.dir", "."));
+            // gameDir: system property (set by premain) > user.dir
+            gameDir = System.getProperty(PROP_GAME_DIR);
+            if (gameDir == null || gameDir.isEmpty()) {
+                gameDir = System.getProperty("user.dir", ".");
+            }
+
+            // serverUrls: parse comma-separated list from system property or config file
+            String serverProp = System.getProperty(PROP_SERVER);
+            if (serverProp == null || serverProp.isEmpty()) {
+                Properties fc = loadConfigFile(new File(gameDir));
+                serverProp = fc.getProperty("server");
+            }
+            if (serverProp == null || serverProp.isEmpty()) {
+                serverProp = DEFAULT_SERVER;
+            }
+            serverUrls = parseServerList(serverProp);
+        }
+
+        /** Parse comma-separated server URLs, trimming whitespace from each. */
+        private static List<String> parseServerList(String raw) {
+            List<String> list = new ArrayList<>();
+            if (raw == null || raw.trim().isEmpty()) return list;
+            for (String token : raw.split(",")) {
+                String url = token.trim();
+                if (!url.isEmpty()) {
+                    // Remove trailing slash for consistency
+                    while (url.endsWith("/")) url = url.substring(0, url.length() - 1);
+                    list.add(url);
+                }
+            }
+            return list;
+        }
+
+        /** Get the currently active server URL. */
+        private String currentServer() {
+            return serverUrls.get(currentServerIndex);
+        }
+
+        /** Try the next server in the list; returns true if there is another to try. */
+        private boolean tryNextServer() {
+            if (currentServerIndex + 1 < serverUrls.size()) {
+                currentServerIndex++;
+                log("Switching to fallback server: " + currentServer());
+                SwingUtilities.invokeLater(() -> {
+                    // Update server display in top panel
+                    Component topPanel = ((JPanel) getContentPane().getComponent(0));
+                    if (topPanel instanceof JPanel) {
+                        JLabel serverLabel = (JLabel) ((JPanel) topPanel).getComponent(0);
+                        serverLabel.setText("Server: " + currentServer());
+                    }
+                });
+                return true;
+            }
+            return false;
         }
 
         private void initUI() {
@@ -167,7 +288,10 @@ public class UpdateAgent {
 
             // Top info
             JPanel topPanel = new JPanel(new GridLayout(2, 1, 4, 4));
-            topPanel.add(new JLabel("Server: " + serverUrl));
+            String serverDisplay = serverUrls.size() <= 1
+                    ? "Server: " + currentServer()
+                    : "Servers (" + serverUrls.size() + "): " + currentServer();
+            topPanel.add(new JLabel(serverDisplay));
             topPanel.add(new JLabel("Game dir: " + gameDir));
             root.add(topPanel, BorderLayout.NORTH);
 
@@ -272,13 +396,16 @@ public class UpdateAgent {
 
         private void doUpdate() {
             try {
-                log("Server:   " + serverUrl);
+                log("Servers (" + serverUrls.size() + "):");
+                for (int i = 0; i < serverUrls.size(); i++) {
+                    log("  [" + (i + 1) + "] " + serverUrls.get(i));
+                }
                 log("Game dir: " + gameDir);
 
-                // 1. fetch manifest
+                // 1. fetch manifest (with multi-server fallback)
                 setStatus("Checking for updates...", true);
                 log("Fetching manifest...");
-                String manifestJson = httpGet(serverUrl + "/api/manifest");
+                String manifestJson = httpGetWithFallback("/api/v2/manifest");
 
                 // 0. self-update check — must happen before regular file sync
                 checkSelfUpdate(manifestJson);
@@ -350,7 +477,7 @@ public class UpdateAgent {
 
                         // URL-encode each path segment for the download URL
                         String encodedPath = encodePath(relPath);
-                        boolean ok = httpDownload(serverUrl + "/api/files/" + encodedPath, tmpFile);
+                        boolean ok = httpDownloadWithFallback("/api/files/" + encodedPath, tmpFile);
                         dlActive = false;
 
                         if (ok) {
@@ -427,7 +554,7 @@ public class UpdateAgent {
         }
 
         // ═══════════════════════════════════════════════════════════
-        //  Network utilities
+        //  Network utilities (multi-server with fallback)
         // ═══════════════════════════════════════════════════════════
 
         /** URL-encode each segment of a path (e.g. "mods/my mod.jar" -> "mods/my%20mod.jar") */
@@ -442,6 +569,44 @@ public class UpdateAgent {
                 }
             }
             return sb.toString();
+        }
+
+        /** HTTP GET with fallback: try each server in order until one succeeds. */
+        private String httpGetWithFallback(String path) throws IOException {
+            IOException lastException = null;
+            int startIndex = currentServerIndex;
+            // Try from current server through the end, then wrap around
+            for (int i = 0; i < serverUrls.size(); i++) {
+                int idx = (startIndex + i) % serverUrls.size();
+                String url = serverUrls.get(idx) + path;
+                try {
+                    if (idx != currentServerIndex) {
+                        log("Trying server: " + serverUrls.get(idx));
+                    }
+                    String result = httpGet(url);
+                    // Success — switch to this server for subsequent requests
+                    if (idx != currentServerIndex) {
+                        log("Switched to server: " + serverUrls.get(idx));
+                        currentServerIndex = idx;
+                        SwingUtilities.invokeLater(() -> {
+                            Component topPanel = ((JPanel) getContentPane().getComponent(0));
+                            if (topPanel instanceof JPanel) {
+                                JLabel serverLabel = (JLabel) ((JPanel) topPanel).getComponent(0);
+                                String display = serverUrls.size() <= 1
+                                        ? "Server: " + currentServer()
+                                        : "Servers (" + serverUrls.size() + "): " + currentServer();
+                                serverLabel.setText(display);
+                            }
+                        });
+                    }
+                    return result;
+                } catch (IOException e) {
+                    lastException = e;
+                    log("  [WARN]  Server unreachable: " + serverUrls.get(idx));
+                }
+            }
+            throw lastException != null ? lastException
+                    : new IOException("All servers unreachable");
         }
 
         private String httpGet(String urlStr) throws IOException {
@@ -459,6 +624,28 @@ public class UpdateAgent {
             } finally {
                 conn.disconnect();
             }
+        }
+
+        /** HTTP download with fallback: try each server in order until one succeeds. */
+        private boolean httpDownloadWithFallback(String path, File dest) {
+            int startIndex = currentServerIndex;
+            for (int i = 0; i < serverUrls.size(); i++) {
+                int idx = (startIndex + i) % serverUrls.size();
+                String url = serverUrls.get(idx) + path;
+                if (idx != currentServerIndex) {
+                    log("Trying server: " + serverUrls.get(idx));
+                }
+                if (httpDownload(url, dest)) {
+                    // Success — switch to this server for subsequent requests
+                    if (idx != currentServerIndex) {
+                        log("Switched to server: " + serverUrls.get(idx));
+                        currentServerIndex = idx;
+                    }
+                    return true;
+                }
+                log("  [WARN]  Download failed from: " + serverUrls.get(idx));
+            }
+            return false;
         }
 
         private boolean httpDownload(String urlStr, File dest) {
@@ -762,7 +949,7 @@ public class UpdateAgent {
             dlLastBytes = 0;
             dlLastTime = System.currentTimeMillis();
 
-            boolean ok = httpDownload(serverUrl + "/api/agent", newJar);
+            boolean ok = httpDownloadWithFallback("/api/agent", newJar);
             dlActive = false;
             SwingUtilities.invokeLater(() -> {
                 dlProgressBar.setValue(0);

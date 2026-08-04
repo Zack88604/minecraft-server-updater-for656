@@ -90,11 +90,21 @@ def _load_manifest():
         return None
 
 
+@app.route('/api/manifest', methods=['GET'])
+def api_manifest_v1():
+    """Deprecated v1 manifest endpoint — returns 410 Gone."""
+    logger.warning("Deprecated /api/manifest accessed — returning 410 Gone")
+    return jsonify({
+        'error': 'Gone',
+        'message': 'This API version is no longer available. Please upgrade your client to continue using.'
+    }), 410
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  API Endpoints
 # ═══════════════════════════════════════════════════════════════════
 
-@app.route('/api/manifest', methods=['GET'])
+@app.route('/api/v2/manifest', methods=['GET'])
 def api_manifest():
     """Return the full file manifest (paths, hashes, sizes)."""
     manifest = _load_manifest()
