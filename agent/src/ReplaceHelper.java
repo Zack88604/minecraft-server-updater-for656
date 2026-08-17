@@ -10,6 +10,8 @@
 
 import java.io.File;
 import java.io.IOException;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 
@@ -79,7 +81,7 @@ public class ReplaceHelper {
                 try {
                     file.delete();
                 } catch (SecurityException ignored) {
-                    // still locked
+                    // security manager denied
                 }
             }
             if (!file.exists()) {
@@ -93,8 +95,10 @@ public class ReplaceHelper {
     /** Attempt to remove our own temporary class dir. Best-effort, not critical. */
     private static void cleanupSelf() {
         try {
-            String myPath = ReplaceHelper.class.getProtectionDomain()
-                    .getCodeSource().getLocation().getPath();
+            String myPath = URLDecoder.decode(
+                    ReplaceHelper.class.getProtectionDomain()
+                            .getCodeSource().getLocation().getPath(),
+                    StandardCharsets.UTF_8);
             File me = new File(myPath);
             // If we are a .class file in a temp dir, delete the .class and its parent dir
             if (me.isFile() && me.getName().endsWith(".class")) {

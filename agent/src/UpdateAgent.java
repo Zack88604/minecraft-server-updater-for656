@@ -200,6 +200,7 @@ public class UpdateAgent {
         private int currentServerIndex = 0;
         private final CountDownLatch latch;
         private final boolean debug;
+        private JLabel serverLabel;
 
         UpdateGUI(CountDownLatch latch, boolean debug) {
             this.latch = latch;
@@ -249,22 +250,19 @@ public class UpdateAgent {
             return serverUrls.get(currentServerIndex);
         }
 
-        /** Try the next server in the list; returns true if there is another to try. */
-        private boolean tryNextServer() {
-            if (currentServerIndex + 1 < serverUrls.size()) {
-                currentServerIndex++;
-                log("Switching to fallback server: " + currentServer());
-                SwingUtilities.invokeLater(() -> {
-                    // Update server display in top panel
-                    Component topPanel = ((JPanel) getContentPane().getComponent(0));
-                    if (topPanel instanceof JPanel) {
-                        JLabel serverLabel = (JLabel) ((JPanel) topPanel).getComponent(0);
-                        serverLabel.setText("Server: " + currentServer());
-                    }
-                });
-                return true;
-            }
-            return false;
+        /** Update the server label in the top panel. */
+        private void updateServerLabel() {
+            String display = serverUrls.size() <= 1
+                    ? "Server: " + currentServer()
+                    : "Servers (" + serverUrls.size() + "): " + currentServer();
+            serverLabel.setText(display);
+        }
+
+        /** Reset the per-file download progress bar and speed label. */
+        private void resetDownloadProgress() {
+            dlProgressBar.setValue(0);
+            dlProgressBar.setString("");
+            lblDlSpeed.setText(" ");
         }
 
         private void initUI() {
@@ -288,10 +286,9 @@ public class UpdateAgent {
 
             // Top info
             JPanel topPanel = new JPanel(new GridLayout(2, 1, 4, 4));
-            String serverDisplay = serverUrls.size() <= 1
-                    ? "Server: " + currentServer()
-                    : "Servers (" + serverUrls.size() + "): " + currentServer();
-            topPanel.add(new JLabel(serverDisplay));
+            serverLabel = new JLabel();
+            updateServerLabel();
+            topPanel.add(serverLabel);
             topPanel.add(new JLabel("Game dir: " + gameDir));
             root.add(topPanel, BorderLayout.NORTH);
 
@@ -507,11 +504,7 @@ public class UpdateAgent {
                         }
 
                         // Reset per-file progress bar immediately
-                        SwingUtilities.invokeLater(() -> {
-                            dlProgressBar.setValue(0);
-                            dlProgressBar.setString("");
-                            lblDlSpeed.setText(" ");
-                        });
+                        SwingUtilities.invokeLater(this::resetDownloadProgress);
                     }
 
                     setStatus("Checked: " + checked + "/" + total, false);
@@ -563,11 +556,7 @@ public class UpdateAgent {
             StringBuilder sb = new StringBuilder();
             for (String seg : relPath.split("/")) {
                 if (sb.length() > 0) sb.append('/');
-                try {
-                    sb.append(URLEncoder.encode(seg, "UTF-8").replace("+", "%20"));
-                } catch (UnsupportedEncodingException e) {
-                    sb.append(seg);
-                }
+                sb.append(URLEncoder.encode(seg, StandardCharsets.UTF_8).replace("+", "%20"));
             }
             return sb.toString();
         }
@@ -589,16 +578,7 @@ public class UpdateAgent {
                     if (idx != currentServerIndex) {
                         log("Switched to server: " + serverUrls.get(idx));
                         currentServerIndex = idx;
-                        SwingUtilities.invokeLater(() -> {
-                            Component topPanel = ((JPanel) getContentPane().getComponent(0));
-                            if (topPanel instanceof JPanel) {
-                                JLabel serverLabel = (JLabel) ((JPanel) topPanel).getComponent(0);
-                                String display = serverUrls.size() <= 1
-                                        ? "Server: " + currentServer()
-                                        : "Servers (" + serverUrls.size() + "): " + currentServer();
-                                serverLabel.setText(display);
-                            }
-                        });
+                        SwingUtilities.invokeLater(this::updateServerLabel);
                     }
                     return result;
                 } catch (IOException e) {
@@ -641,6 +621,7 @@ public class UpdateAgent {
                     if (idx != currentServerIndex) {
                         log("Switched to server: " + serverUrls.get(idx));
                         currentServerIndex = idx;
+                        SwingUtilities.invokeLater(this::updateServerLabel);
                     }
                     return true;
                 }
@@ -952,11 +933,7 @@ public class UpdateAgent {
 
             boolean ok = httpDownloadWithFallback("/api/agent", newJar);
             dlActive = false;
-            SwingUtilities.invokeLater(() -> {
-                dlProgressBar.setValue(0);
-                dlProgressBar.setString("");
-                lblDlSpeed.setText(" ");
-            });
+            SwingUtilities.invokeLater(this::resetDownloadProgress);
 
             if (!ok) {
                 log("  [FAIL]  Agent download failed");
@@ -1055,9 +1032,7 @@ public class UpdateAgent {
         private void showError(String msg) {
             dlRefreshTimer.stop();
             SwingUtilities.invokeLater(() -> {
-                dlProgressBar.setValue(0);
-                dlProgressBar.setString("");
-                lblDlSpeed.setText(" ");
+                resetDownloadProgress();
                 log("[ERROR] " + msg);
                 setStatus("Update failed", false);
                 progressBar.setIndeterminate(false);
