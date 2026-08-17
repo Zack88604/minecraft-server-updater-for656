@@ -531,7 +531,8 @@ public class UpdateAgent {
                 if (finalFailed > 0) {
                     SwingUtilities.invokeLater(() -> {
                         setStatus("Update finished with " + finalFailed + " error(s)", false);
-                        autoClose(3000);
+                        log("[FATAL] " + finalFailed + " file(s) failed to update, killing Minecraft process...");
+                        new javax.swing.Timer(2000, ev -> System.exit(1)).start();
                     });
                 } else if (finalUpdated > 0) {
                     SwingUtilities.invokeLater(() -> {
@@ -549,7 +550,7 @@ public class UpdateAgent {
                 dlRefreshTimer.stop();
                 showError("Update error: " + e.getMessage());
                 e.printStackTrace();
-                latch.countDown();
+                // showError will System.exit() — do NOT release the latch
             }
         }
 
@@ -1063,8 +1064,9 @@ public class UpdateAgent {
                 progressBar.setValue(0);
                 JOptionPane.showMessageDialog(this,
                         msg, "Update Error", JOptionPane.ERROR_MESSAGE);
-                latch.countDown();
-                dispose();
+                // Terminate the JVM before Minecraft's main() ever runs
+                log("[FATAL] Killing Minecraft process...");
+                System.exit(1);
             });
         }
     }
