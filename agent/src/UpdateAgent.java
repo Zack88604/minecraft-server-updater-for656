@@ -1064,9 +1064,10 @@ public class UpdateAgent {
                 progressBar.setValue(0);
                 JOptionPane.showMessageDialog(this,
                         msg, "Update Error", JOptionPane.ERROR_MESSAGE);
-                // Terminate the JVM before Minecraft's main() ever runs
+                // Terminate the JVM before Minecraft's main() ever runs.
+                // Delay exit by 1s so the fatal log message is painted and visible.
                 log("[FATAL] Killing Minecraft process...");
-                System.exit(1);
+                new javax.swing.Timer(1000, ev -> System.exit(1)).start();
             });
         }
     }
