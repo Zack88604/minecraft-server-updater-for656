@@ -1,0 +1,17 @@
+# Auto-detect text files and ensure LF for shell scripts
+* text=auto
+
+# Shell scripts MUST use LF line endings (CRLF breaks shebang on Linux)
+*.sh text eol=lf
+
+# Python files should use LF on Linux containers
+*.py text eol=lf
+
+# Dockerfile must use LF
+Dockerfile text eol=lf
+
+# Java source files — native line endings are fine
+*.java text
+
+# Batch scripts — MUST use CRLF on Windows
+*.bat text eol=crlf
