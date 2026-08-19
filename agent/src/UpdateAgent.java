@@ -36,8 +36,6 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.jar.JarEntry;
-import java.util.jar.JarFile;
 
 public class UpdateAgent {
 
@@ -164,7 +162,7 @@ public class UpdateAgent {
         try {
             String path = UpdateAgent.class.getProtectionDomain()
                     .getCodeSource().getLocation().getPath();
-            return URLDecoder.decode(path, "UTF-8");
+            return URLDecoder.decode(path, StandardCharsets.UTF_8);
         } catch (Exception e) {
             return null;
         }
@@ -449,7 +447,10 @@ public class UpdateAgent {
                         needDownload = true;
                     } else {
                         String localHash = sha256(localFile);
-                        if (!localHash.equals(entry.hash)) {
+                        if (localHash == null) {
+                            log("  [WARN]  " + relPath + " (cannot read, re-downloading)");
+                            needDownload = true;
+                        } else if (!localHash.equals(entry.hash)) {
                             log("  [DIFF]  " + relPath + " (hash mismatch)");
                             needDownload = true;
                         } else {
@@ -479,7 +480,7 @@ public class UpdateAgent {
 
                         if (ok) {
                             String dlHash = sha256(tmpFile);
-                            if (dlHash.equals(entry.hash)) {
+                            if (dlHash != null && dlHash.equals(entry.hash)) {
                                 // delete target first (Windows renameTo does not overwrite)
                                 if (localFile.exists()) localFile.delete();
                                 if (tmpFile.renameTo(localFile)) {
@@ -671,7 +672,7 @@ public class UpdateAgent {
                 for (byte b : digest) sb.append(String.format("%02x", b));
                 return sb.toString();
             } catch (Exception e) {
-                return "";
+                return null;
             }
         }
 
@@ -883,7 +884,7 @@ public class UpdateAgent {
 
         // ── Self-update ─────────────────────────────────────────
 
-        /** Check manifest for agent update; download if newer; schedule post-exit replace. */
+        /** Check manifest for agent update; download if newer. */
         private void checkSelfUpdate(String manifestJson) {
             String agentObj = jsonGetObject(manifestJson, "agent");
             if (agentObj == null) {
@@ -912,6 +913,10 @@ public class UpdateAgent {
             log("Checking agent update...");
             log("  My path:    " + myJarPath);
             String myHash = sha256(myJar);
+            if (myHash == null) {
+                log("  [SKIP]  Cannot compute local agent hash");
+                return;
+            }
             if (myHash.equals(agentHash)) {
                 log("  [OK]    Agent is up to date");
                 return;
@@ -942,75 +947,13 @@ public class UpdateAgent {
             }
 
             String dlHash = sha256(newJar);
-            if (!dlHash.equals(agentHash)) {
+            if (dlHash == null || !dlHash.equals(agentHash)) {
                 log("  [FAIL]  Agent hash mismatch after download");
                 newJar.delete();
                 return;
             }
 
             log("  [OK]    Agent downloaded, will replace on next restart");
-            scheduleSelfReplace(myJarPath, newJar.getAbsolutePath());
-        }
-
-        /** Register a shutdown hook that extracts a helper class from our own JAR and
-         *  spawns a detached Java process to replace the agent JAR after JVM exit.
-         *  This avoids cmd.exe / batch scripts that may trigger antivirus on Windows. */
-        private void scheduleSelfReplace(String oldJarPath, String newJarPath) {
-            try {
-                // Extract ReplaceHelper.class from our own JAR into a temp dir
-                File tempDir = new File(System.getProperty("java.io.tmpdir"), "mc-update-helper");
-                if (!tempDir.isDirectory()) tempDir.mkdirs();
-                extractReplaceHelper(oldJarPath, tempDir);
-
-                // Find java executable from the same JRE that is running us
-                String javaHome = System.getProperty("java.home");
-                boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
-                String javaExe = javaHome + File.separator + "bin" + File.separator
-                        + (isWindows ? "java.exe" : "java");
-
-                // On Windows, prefer javaw.exe (no console window) if available
-                if (isWindows) {
-                    File javawExe = new File(javaHome + File.separator + "bin" + File.separator
-                            + "javaw.exe");
-                    if (javawExe.isFile()) javaExe = javawExe.getAbsolutePath();
-                }
-
-                String[] cmd = new String[]{
-                        javaExe, "-cp", tempDir.getAbsolutePath(),
-                        "ReplaceHelper", oldJarPath, newJarPath
-                };
-
-                Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                    try {
-                        new ProcessBuilder(cmd).inheritIO().start();
-                    } catch (IOException ignored) {}
-                }, "mc-agent-replace-hook"));
-
-                log("  [INFO]  Replace scheduled via: " + javaExe);
-            } catch (Exception e) {
-                log("  [WARN]  Failed to schedule agent replacement: " + e.getMessage());
-            }
-        }
-
-        /** Extract ReplaceHelper.class from our JAR into tempDir so it can run independently
-         *  (reading from a JAR that is about to be replaced would fail on Windows). */
-        private void extractReplaceHelper(String jarPath, File tempDir) {
-            try (JarFile jar = new JarFile(jarPath)) {
-                JarEntry entry = jar.getJarEntry("ReplaceHelper.class");
-                if (entry == null) {
-                    log("  [WARN]  ReplaceHelper.class not found in JAR");
-                    return;
-                }
-                File outFile = new File(tempDir, "ReplaceHelper.class");
-                try (InputStream in = jar.getInputStream(entry);
-                     FileOutputStream out = new FileOutputStream(outFile)) {
-                    byte[] buf = new byte[8192];
-                    int n;
-                    while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
-                }
-            } catch (IOException e) {
-                log("  [WARN]  Cannot extract ReplaceHelper: " + e.getMessage());
-            }
         }
 
         // ── GUI helpers ──────────────────────────────────────────

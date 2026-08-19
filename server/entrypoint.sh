@@ -14,7 +14,11 @@ echo "[update-service] Log file: /data/logs/${STARTUP_TS}.log"
 # Auto-generate default manifest if missing
 if [ ! -f /data/manifest.json ]; then
     echo "[update-service] WARNING: No manifest found. Generating default manifest..."
-    python3 /app/generate_manifest.py --dir /data/files --out /data
+    AGENT_ARG=""
+    if [ -f /data/agent/UpdateAgent_core.jar ]; then
+        AGENT_ARG="--agent-jar /data/agent/UpdateAgent_core.jar"
+    fi
+    python3 /app/generate_manifest.py --dir /data/files --out /data $AGENT_ARG
 fi
 
 echo "[update-service] Starting update service..."

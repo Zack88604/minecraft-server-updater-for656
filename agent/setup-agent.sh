@@ -23,9 +23,15 @@ SERVER_URL="${2:-http://localhost:25565}"
 
 # Determine Agent JAR path (same directory as this script)
 AGENT_JAR="$(cd "$(dirname "$0")" && pwd)/UpdateAgent.jar"
+CORE_JAR="$(cd "$(dirname "$0")" && pwd)/UpdateAgent_core.jar"
 
 if [ ! -f "$AGENT_JAR" ]; then
     echo "[setup] ERROR: UpdateAgent.jar not found at $AGENT_JAR"
+    echo "[setup] Run build.sh first to generate the JAR."
+    exit 1
+fi
+if [ ! -f "$CORE_JAR" ]; then
+    echo "[setup] ERROR: UpdateAgent_core.jar not found at $CORE_JAR"
     echo "[setup] Run build.sh first to generate the JAR."
     exit 1
 fi
@@ -61,7 +67,8 @@ else
 fi
 
 echo "[setup] Done!"
-echo "[setup] Agent JAR: $AGENT_JAR"
+echo "[setup] Launcher:  $AGENT_JAR"
+echo "[setup] Core:      $CORE_JAR"
 echo "[setup] Config:    $CONFIG_FILE"
 echo "[setup] Server:    $SERVER_URL"
 echo ""

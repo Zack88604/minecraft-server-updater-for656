@@ -25,9 +25,15 @@ if "%SERVER_URL%"=="" set SERVER_URL=http://localhost:25565
 
 REM Determine Agent JAR path (same directory as this script)
 set AGENT_JAR=%~dp0UpdateAgent.jar
+set CORE_JAR=%~dp0UpdateAgent_core.jar
 
 if not exist "%AGENT_JAR%" (
     echo [setup] ERROR: UpdateAgent.jar not found at %AGENT_JAR%
+    echo [setup] Run build.bat first to generate the JAR.
+    exit /b 1
+)
+if not exist "%CORE_JAR%" (
+    echo [setup] ERROR: UpdateAgent_core.jar not found at %CORE_JAR%
     echo [setup] Run build.bat first to generate the JAR.
     exit /b 1
 )
@@ -62,7 +68,8 @@ if !ERRORLEVEL! equ 0 (
 )
 
 echo [setup] Done!
-echo [setup] Agent JAR: %AGENT_JAR%
+echo [setup] Launcher:  %AGENT_JAR%
+echo [setup] Core:      %CORE_JAR%
 echo [setup] Config:    %CONFIG_FILE%
 echo [setup] Server:    %SERVER_URL%
 echo.

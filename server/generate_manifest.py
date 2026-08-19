@@ -188,7 +188,7 @@ def main():
     )
     parser.add_argument(
         '--agent-jar', default=None,
-        help='Path to UpdateAgent.jar (optional, records self-update info in manifest)'
+        help='Path to UpdateAgent_core.jar (optional, records self-update info in manifest)'
     )
     args = parser.parse_args()
 

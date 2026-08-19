@@ -135,12 +135,12 @@ def api_download(filepath):
 
 @app.route('/api/agent', methods=['GET'])
 def api_agent():
-    """Download the latest UpdateAgent.jar (for self-update)."""
-    agent_jar = os.path.join(AGENT_DIR, 'UpdateAgent.jar')
+    """Download the latest UpdateAgent_core.jar (for self-update)."""
+    agent_jar = os.path.join(AGENT_DIR, 'UpdateAgent_core.jar')
     if not os.path.isfile(agent_jar):
-        logger.warning("Agent JAR not found")
+        logger.warning("Agent core JAR not found")
         abort(404)
-    logger.info("Agent download")
+    logger.info("Agent core download")
     return send_file(agent_jar, mimetype='application/java-archive', as_attachment=False)
 
 
@@ -179,8 +179,8 @@ def api_generate():
     cmd = [sys.executable, '/app/generate_manifest.py',
            '--dir', FILES_DIR, '--out', DATA_DIR]
 
-    # Attach agent JAR info if present, for client self-update
-    agent_jar = os.path.join(AGENT_DIR, 'UpdateAgent.jar')
+    # Attach agent core JAR info if present, for client self-update
+    agent_jar = os.path.join(AGENT_DIR, 'UpdateAgent_core.jar')
     if os.path.isfile(agent_jar):
         cmd.extend(['--agent-jar', agent_jar])
 

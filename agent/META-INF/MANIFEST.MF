@@ -1,5 +1,5 @@
 Manifest-Version: 1.0
-Premain-Class: UpdateAgent
+Premain-Class: Launcher
 Can-Retransform-Classes: true
-Agent-Class: UpdateAgent
+Agent-Class: Launcher
 
