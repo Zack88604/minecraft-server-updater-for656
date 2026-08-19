@@ -22,7 +22,7 @@ if %ERRORLEVEL% neq 0 (
 
 echo [build] Packaging launcher JAR...
 cd /d "%BUILD_DIR%"
-jar cfm "%LAUNCHER_JAR%" "%SCRIPT_DIR%META-INF\MANIFEST.MF" Launcher.class Launcher$*.class 2>nul
+jar cfm "%LAUNCHER_JAR%" "%SCRIPT_DIR%META-INF\MANIFEST.MF" Launcher.class
 if %ERRORLEVEL% neq 0 (
     echo [build] Launcher JAR packaging failed!
     exit /b 1
@@ -31,7 +31,6 @@ if %ERRORLEVEL% neq 0 (
 echo [build] Packaging core JAR...
 REM Temporarily exclude Launcher classes from core JAR
 if exist Launcher.class ren Launcher.class Launcher.class.exclude
-if exist Launcher$1.class ren Launcher$1.class Launcher$1.class.exclude 2>nul
 jar cf "%CORE_JAR%" *.class
 if %ERRORLEVEL% neq 0 (
     echo [build] Core JAR packaging failed!
@@ -39,7 +38,6 @@ if %ERRORLEVEL% neq 0 (
 )
 REM Restore Launcher classes
 if exist Launcher.class.exclude ren Launcher.class.exclude Launcher.class
-if exist Launcher$1.class.exclude ren Launcher$1.class.exclude Launcher$1.class 2>nul
 
 echo [build] Done!
 echo [build] Launcher: %LAUNCHER_JAR%

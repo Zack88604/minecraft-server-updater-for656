@@ -18,18 +18,14 @@ javac -d "$BUILD_DIR" "$SRC_DIR/Launcher.java" "$SRC_DIR/UpdateAgent.java"
 
 echo "[build] Packaging launcher JAR..."
 cd "$BUILD_DIR"
-jar cfm "$LAUNCHER_JAR" "$SCRIPT_DIR/META-INF/MANIFEST.MF" Launcher.class Launcher\$*.class 2>/dev/null || true
+jar cfm "$LAUNCHER_JAR" "$SCRIPT_DIR/META-INF/MANIFEST.MF" Launcher.class
 
 echo "[build] Packaging core JAR..."
-# Temporarily exclude Launcher classes from core JAR
-for f in Launcher.class Launcher\$*.class; do
-    [ -f "$f" ] && mv "$f" "$f.exclude"
-done
+# Temporarily exclude Launcher class from core JAR
+if [ -f Launcher.class ]; then mv Launcher.class Launcher.class.exclude; fi
 jar cf "$CORE_JAR" *.class
-# Restore Launcher classes
-for f in *.class.exclude; do
-    [ -f "$f" ] && mv "$f" "${f%.exclude}"
-done
+# Restore Launcher class
+if [ -f Launcher.class.exclude ]; then mv Launcher.class.exclude Launcher.class; fi
 
 echo "[build] Done!"
 echo "[build] Launcher: $LAUNCHER_JAR"
