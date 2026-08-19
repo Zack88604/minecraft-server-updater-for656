@@ -71,14 +71,15 @@ public class Launcher {
             }
 
             // 3. Load core JAR and delegate to UpdateAgent.premain()
-            URLClassLoader cl = new URLClassLoader(
+            try (URLClassLoader cl = new URLClassLoader(
                     new URL[]{coreJar.toURI().toURL()},
                     Launcher.class.getClassLoader()
-            );
-            Class<?> agentClass = cl.loadClass("UpdateAgent");
-            Method premain = agentClass.getMethod("premain", String.class,
-                    Instrumentation.class);
-            premain.invoke(null, args, inst);
+            )) {
+                Class<?> agentClass = cl.loadClass("UpdateAgent");
+                Method premain = agentClass.getMethod("premain", String.class,
+                        Instrumentation.class);
+                premain.invoke(null, args, inst);
+            }
 
         } catch (Exception e) {
             System.err.println("[Launcher] FATAL: " + e.getMessage());

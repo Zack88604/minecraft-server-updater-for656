@@ -21,7 +21,7 @@ import java.awt.*;
 import java.io.*;
 import java.lang.instrument.Instrumentation;
 import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.URI;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -592,7 +592,7 @@ public class UpdateAgent {
         }
 
         private String httpGet(String urlStr) throws IOException {
-            HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+            HttpURLConnection conn = (HttpURLConnection) URI.create(urlStr).toURL().openConnection();
             conn.setRequestMethod("GET");
             conn.setConnectTimeout(10000);
             conn.setReadTimeout(30000);
@@ -633,7 +633,7 @@ public class UpdateAgent {
 
         private boolean httpDownload(String urlStr, File dest) {
             try {
-                HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+                HttpURLConnection conn = (HttpURLConnection) URI.create(urlStr).toURL().openConnection();
                 conn.setRequestMethod("GET");
                 conn.setConnectTimeout(10000);
                 conn.setReadTimeout(60000);
