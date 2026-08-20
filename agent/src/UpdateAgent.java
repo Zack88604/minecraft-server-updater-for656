@@ -25,6 +25,9 @@ import java.net.URI;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -505,9 +508,7 @@ public class UpdateAgent {
                         if (ok) {
                             String dlHash = sha256(tmpFile);
                             if (dlHash != null && dlHash.equals(entry.hash)) {
-                                // delete target first (Windows renameTo does not overwrite)
-                                if (localFile.exists()) localFile.delete();
-                                if (tmpFile.renameTo(localFile)) {
+                                if (replaceDownloadedFile(tmpFile, localFile, relPath)) {
                                     long dlElapsed = System.currentTimeMillis() - dlStart;
                                     double avgSpeed = dlElapsed > 0 ? entry.size * 1000.0 / dlElapsed : 0;
                                     log("         -> Done (" + entry.size + " bytes, " + formatSpeed(avgSpeed) + ")");
@@ -698,6 +699,28 @@ public class UpdateAgent {
             } catch (Exception e) {
                 return null;
             }
+        }
+
+        private boolean replaceDownloadedFile(File tmpFile, File localFile, String relPath) {
+            try {
+                Files.move(tmpFile.toPath(), localFile.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+                return true;
+            } catch (AtomicMoveNotSupportedException e) {
+                try {
+                    Files.move(tmpFile.toPath(), localFile.toPath(),
+                            StandardCopyOption.REPLACE_EXISTING);
+                    return true;
+                } catch (IOException fallbackError) {
+                    log("  [FAIL]  " + relPath + ": cannot replace file ("
+                            + fallbackError.getMessage() + ")");
+                }
+            } catch (IOException e) {
+                log("  [FAIL]  " + relPath + ": cannot replace file ("
+                        + e.getMessage() + ")");
+            }
+            return false;
         }
 
         // ═══════════════════════════════════════════════════════════
