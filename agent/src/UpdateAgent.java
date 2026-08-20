@@ -243,6 +243,24 @@ public class UpdateAgent {
             return list;
         }
 
+        /** Resolve a manifest/config path beneath the game directory. */
+        private File resolveManagedFile(String relativePath) {
+            if (relativePath == null || relativePath.isEmpty()) return null;
+            String path = relativePath.replace('\\', '/');
+            if (path.startsWith("/") || path.matches("^[A-Za-z]:.*")) return null;
+            for (String segment : path.split("/")) {
+                if ("..".equals(segment)) return null;
+            }
+            try {
+                File base = new File(gameDir).getCanonicalFile();
+                File target = new File(base, path.replace('/', File.separatorChar))
+                .getCanonicalFile();
+                return target.toPath().startsWith(base.toPath()) ? target : null;
+            } catch (IOException | SecurityException e) {
+                return null;
+            }
+        }
+
         /** Get the currently active server URL. */
         private String currentServer() {
             return serverUrls.get(currentServerIndex);
@@ -437,9 +455,15 @@ public class UpdateAgent {
                 for (FileEntry entry : manifestFiles) {
                     checked++;
                     String relPath = entry.path;
-                    // normalize separators for current OS
-                    String osPath = relPath.replace('/', File.separatorChar);
-                    File localFile = new File(gameDir, osPath);
+
+                    File localFile = resolveManagedFile(relPath);
+                    if (localFile == null) {
+                        log("  [REJECT] " + relPath + " (unsafe manifest path)");
+                        failed++;
+                        setStatus("Rejected unsafe path: " + checked + "/" + total, false);
+                        progressBar.setValue(total > 0 ? checked * 95 / total : 100);
+                        continue;
+                    }
                     boolean needDownload = false;
 
                     if (!localFile.isFile()) {
@@ -784,16 +808,23 @@ public class UpdateAgent {
             for (FileEntry e : manifestFiles) manifestSet.add(e.path);
             for (String mp : managedPaths) {
                 if (mp.equals("*")) continue;
+                String pathToResolve = mp.endsWith("/")
+                ? mp.substring(0, mp.length() - 1)
+                : mp;
+                File managedFile = resolveManagedFile(pathToResolve);
+                if (managedFile == null) {
+                    log("  [REJECT] " + mp + " (unsafe managed path)");
+                    continue;
+                }
                 if (mp.endsWith("/")) {
                     // Directory path: recursively clean this directory
-                    File dir = new File(gameDir, mp);
+                    File dir = managedFile;
                     if (dir.isDirectory()) {
                         deleteStaleInDir(dir, gameDir, manifestSet, excludedPaths);
                     }
                 } else {
                     // Exact file path: check if this file is in manifest
-                    String normalizedPath = mp.replace('/', File.separatorChar);
-                    File file = new File(gameDir, normalizedPath);
+                    File file = managedFile;
                     if (file.isFile() && !file.getName().startsWith(".")) {
                         String rel = mp.replace('\\', '/');
                         if (isExcluded(rel, excludedPaths)) {
