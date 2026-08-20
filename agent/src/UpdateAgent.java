@@ -202,6 +202,62 @@ public class UpdateAgent {
         private final CountDownLatch latch;
         private final boolean debug;
         private JLabel serverLabel;
+        private UpdateWorker updateWorker;
+
+        private enum UiEventType {
+            STATUS, LOG, OVERALL_PROGRESS, RESET_DOWNLOAD_PROGRESS,
+            SERVER_LABEL, STOP_DOWNLOAD_REFRESH
+        }
+
+        /** A background-to-EDT message. UI components are only changed in process(). */
+        private static final class UiEvent {
+            final UiEventType type;
+            final String text;
+            final boolean indeterminate;
+            final int progress;
+
+            private UiEvent(UiEventType type, String text, boolean indeterminate, int progress) {
+                this.type = type;
+                this.text = text;
+                this.indeterminate = indeterminate;
+                this.progress = progress;
+            }
+
+            static UiEvent status(String text, boolean indeterminate) {
+                return new UiEvent(UiEventType.STATUS, text, indeterminate, 0);
+            }
+
+            static UiEvent log(String text) {
+                return new UiEvent(UiEventType.LOG, text, false, 0);
+            }
+
+            static UiEvent overallProgress(int progress) {
+                return new UiEvent(UiEventType.OVERALL_PROGRESS, null, false, progress);
+            }
+
+            static UiEvent serverLabel(String text) {
+                return new UiEvent(UiEventType.SERVER_LABEL, text, false, 0);
+            }
+
+            static UiEvent resetDownloadProgress() {
+                return new UiEvent(UiEventType.RESET_DOWNLOAD_PROGRESS, null, false, 0);
+            }
+
+            static UiEvent stopDownloadRefresh() {
+                return new UiEvent(UiEventType.STOP_DOWNLOAD_REFRESH, null, false, 0);
+            }
+        }
+
+        /** Final result returned by the background update operation. */
+        private static final class UpdateResult {
+            final int updated;
+            final int failed;
+
+            UpdateResult(int updated, int failed) {
+                this.updated = updated;
+                this.failed = failed;
+            }
+        }
 
         UpdateGUI(CountDownLatch latch, boolean debug) {
             this.latch = latch;
@@ -271,12 +327,10 @@ public class UpdateAgent {
 
         /** Update the server label in the top panel. */
         private void updateServerLabel() {
-            runOnEdt(() -> {
-                String display = serverUrls.size() <= 1
-                        ? "Server: " + currentServer()
-                        : "Servers (" + serverUrls.size() + "): " + currentServer();
-                serverLabel.setText(display);
-            });
+            String display = serverUrls.size() <= 1
+                    ? "Server: " + currentServer()
+                    : "Servers (" + serverUrls.size() + "): " + currentServer();
+            dispatchUiEvent(UiEvent.serverLabel(display));
         }
 
         /** Run a UI mutation on Swing's Event Dispatch Thread. */
@@ -288,27 +342,58 @@ public class UpdateAgent {
             }
         }
 
+        /** Deliver an event through SwingWorker when called from its worker thread. */
+        private void dispatchUiEvent(UiEvent event) {
+            UpdateWorker worker = updateWorker;
+            if (worker != null && !SwingUtilities.isEventDispatchThread() && !worker.isDone()) {
+                worker.emit(event);
+            } else {
+                runOnEdt(() -> applyUiEvent(event));
+            }
+        }
+
+        /** Apply a UI event. This method must run on the EDT. */
+        private void applyUiEvent(UiEvent event) {
+            switch (event.type) {
+                case STATUS:
+                    lblStatus.setText(event.text);
+                    progressBar.setIndeterminate(event.indeterminate);
+                    break;
+                case LOG:
+                    logArea.append(event.text + "\n");
+                    logArea.setCaretPosition(logArea.getDocument().getLength());
+                    break;
+                case OVERALL_PROGRESS:
+                    progressBar.setIndeterminate(false);
+                    progressBar.setValue(Math.max(0, Math.min(100, event.progress)));
+                    break;
+                case RESET_DOWNLOAD_PROGRESS:
+                    dlProgressBar.setValue(0);
+                    dlProgressBar.setString("");
+                    lblDlSpeed.setText(" ");
+                    break;
+                case SERVER_LABEL:
+                    serverLabel.setText(event.text);
+                    break;
+                case STOP_DOWNLOAD_REFRESH:
+                    dlRefreshTimer.stop();
+                    break;
+            }
+        }
+
         /** Set the overall progress bar to a determinate percentage. */
         private void setOverallProgress(int value) {
-            int clamped = Math.max(0, Math.min(100, value));
-            runOnEdt(() -> {
-                progressBar.setIndeterminate(false);
-                progressBar.setValue(clamped);
-            });
+            dispatchUiEvent(UiEvent.overallProgress(value));
         }
 
         /** Reset the per-file download progress bar and speed label. */
         private void resetDownloadProgress() {
-            runOnEdt(() -> {
-                dlProgressBar.setValue(0);
-                dlProgressBar.setString("");
-                lblDlSpeed.setText(" ");
-            });
+            dispatchUiEvent(UiEvent.resetDownloadProgress());
         }
 
         /** Stop the Swing refresh timer from the EDT. */
         private void stopDownloadRefreshTimer() {
-            runOnEdt(dlRefreshTimer::stop);
+            dispatchUiEvent(UiEvent.stopDownloadRefresh());
         }
 
         private void initUI() {
@@ -434,168 +519,180 @@ public class UpdateAgent {
 
         private void startUpdate() {
             dlRefreshTimer.start();
-            new Thread(this::doUpdate, "mc-update-worker").start();
+            updateWorker = new UpdateWorker();
+            updateWorker.execute();
         }
 
-        private void doUpdate() {
-            try {
-                log("Servers (" + serverUrls.size() + "):");
-                for (int i = 0; i < serverUrls.size(); i++) {
-                    log("  [" + (i + 1) + "] " + serverUrls.get(i));
+        /** Performs blocking network and file work; no Swing components are touched here. */
+        private UpdateResult performUpdate() throws Exception {
+            log("Servers (" + serverUrls.size() + "):");
+            for (int i = 0; i < serverUrls.size(); i++) {
+                log("  [" + (i + 1) + "] " + serverUrls.get(i));
+            }
+            log("Game dir: " + gameDir);
+
+            // 1. fetch manifest (with multi-server fallback)
+            setStatus("Checking for updates...", true);
+            log("Fetching manifest...");
+            String manifestJson = httpGetWithFallback("/api/v2/manifest");
+
+            // 0. self-update check — must happen before regular file sync
+            checkSelfUpdate(manifestJson);
+
+            String filesArray = jsonGetArray(manifestJson, "files");
+            if (filesArray == null) {
+                throw new IOException("Cannot parse manifest");
+            }
+
+            List<FileEntry> manifestFiles = parseFileEntries(filesArray);
+            log("Manifest contains " + manifestFiles.size() + " file(s)");
+
+            String managedArray = jsonGetArray(manifestJson, "managed_paths");
+            List<String> managedPaths = parseStringArray(managedArray != null ? managedArray : "");
+            log("Managed paths:");
+            for (String p : managedPaths) log("  - " + p);
+
+            String excludedArray = jsonGetArray(manifestJson, "excluded_paths");
+            List<String> excludedPaths = parseStringArray(excludedArray != null ? excludedArray : "");
+            if (!excludedPaths.isEmpty()) {
+                log("Excluded paths:");
+                for (String p : excludedPaths) log("  - " + p);
+            }
+
+            // 2. check and download each file
+            setOverallProgress(0);
+            int total = manifestFiles.size();
+            int checked = 0;
+            int updated = 0;
+            int failed = 0;
+
+            for (FileEntry entry : manifestFiles) {
+                checked++;
+                String relPath = entry.path;
+
+                File localFile = resolveManagedFile(relPath);
+                if (localFile == null) {
+                    log("  [REJECT] " + relPath + " (unsafe manifest path)");
+                    failed++;
+                    setStatus("Rejected unsafe path: " + checked + "/" + total, false);
+                    setOverallProgress(total > 0 ? checked * 95 / total : 100);
+                    continue;
                 }
-                log("Game dir: " + gameDir);
+                boolean needDownload = false;
 
-                // 1. fetch manifest (with multi-server fallback)
-                setStatus("Checking for updates...", true);
-                log("Fetching manifest...");
-                String manifestJson = httpGetWithFallback("/api/v2/manifest");
-
-                // 0. self-update check — must happen before regular file sync
-                checkSelfUpdate(manifestJson);
-
-                String filesArray = jsonGetArray(manifestJson, "files");
-                if (filesArray == null) {
-                    showError("Cannot parse manifest");
-                    return;
-                }
-
-                List<FileEntry> manifestFiles = parseFileEntries(filesArray);
-                log("Manifest contains " + manifestFiles.size() + " file(s)");
-
-                String managedArray = jsonGetArray(manifestJson, "managed_paths");
-                List<String> managedPaths = parseStringArray(managedArray != null ? managedArray : "");
-                log("Managed paths:");
-                for (String p : managedPaths) log("  - " + p);
-
-                String excludedArray = jsonGetArray(manifestJson, "excluded_paths");
-                List<String> excludedPaths = parseStringArray(excludedArray != null ? excludedArray : "");
-                if (!excludedPaths.isEmpty()) {
-                    log("Excluded paths:");
-                    for (String p : excludedPaths) log("  - " + p);
-                }
-
-                // 2. check and download each file
-                setOverallProgress(0);
-                int total = manifestFiles.size();
-                int checked = 0;
-                int updated = 0;
-                int failed = 0;
-
-                for (FileEntry entry : manifestFiles) {
-                    checked++;
-                    String relPath = entry.path;
-
-                    File localFile = resolveManagedFile(relPath);
-                    if (localFile == null) {
-                        log("  [REJECT] " + relPath + " (unsafe manifest path)");
-                        failed++;
-                        setStatus("Rejected unsafe path: " + checked + "/" + total, false);
-                        setOverallProgress(total > 0 ? checked * 95 / total : 100);
-                        continue;
-                    }
-                    boolean needDownload = false;
-
-                    if (!localFile.isFile()) {
-                        log("  [MISS]  " + relPath);
+                if (!localFile.isFile()) {
+                    log("  [MISS]  " + relPath);
+                    needDownload = true;
+                } else {
+                    String localHash = sha256(localFile);
+                    if (localHash == null) {
+                        log("  [WARN]  " + relPath + " (cannot read, re-downloading)");
+                        needDownload = true;
+                    } else if (!localHash.equals(entry.hash)) {
+                        log("  [DIFF]  " + relPath + " (hash mismatch)");
                         needDownload = true;
                     } else {
-                        String localHash = sha256(localFile);
-                        if (localHash == null) {
-                            log("  [WARN]  " + relPath + " (cannot read, re-downloading)");
-                            needDownload = true;
-                        } else if (!localHash.equals(entry.hash)) {
-                            log("  [DIFF]  " + relPath + " (hash mismatch)");
-                            needDownload = true;
-                        } else {
-                            log("  [OK]    " + relPath);
-                        }
+                        log("  [OK]    " + relPath);
                     }
+                }
 
-                    if (needDownload) {
-                        setStatus("Downloading: " + relPath, false);
-                        log("         -> Downloading " + relPath + "...");
-                        File parent = localFile.getParentFile();
-                        if (parent != null && !parent.isDirectory()) parent.mkdirs();
-                        File tmpFile = new File(localFile.getPath() + ".tmp");
+                if (needDownload) {
+                    setStatus("Downloading: " + relPath, false);
+                    log("         -> Downloading " + relPath + "...");
+                    File parent = localFile.getParentFile();
+                    if (parent != null && !parent.isDirectory()) parent.mkdirs();
+                    File tmpFile = new File(localFile.getPath() + ".tmp");
 
-                        // Track per-file download progress
-                        dlTotalBytes = entry.size;
-                        dlDownloadedBytes = 0;
-                        dlActive = true;
-                        dlLastBytes = 0;
-                        dlLastTime = System.currentTimeMillis();
-                        long dlStart = dlLastTime;
+                    // Track per-file download progress
+                    dlTotalBytes = entry.size;
+                    dlDownloadedBytes = 0;
+                    dlActive = true;
+                    dlLastBytes = 0;
+                    dlLastTime = System.currentTimeMillis();
+                    long dlStart = dlLastTime;
 
-                        // URL-encode each path segment for the download URL
-                        String encodedPath = encodePath(relPath);
-                        boolean ok = httpDownloadWithFallback("/api/files/" + encodedPath, tmpFile);
-                        dlActive = false;
+                    // URL-encode each path segment for the download URL
+                    String encodedPath = encodePath(relPath);
+                    boolean ok = httpDownloadWithFallback("/api/files/" + encodedPath, tmpFile);
+                    dlActive = false;
 
-                        if (ok) {
-                            String dlHash = sha256(tmpFile);
-                            if (dlHash != null && dlHash.equals(entry.hash)) {
-                                if (replaceDownloadedFile(tmpFile, localFile, relPath)) {
-                                    long dlElapsed = System.currentTimeMillis() - dlStart;
-                                    double avgSpeed = dlElapsed > 0 ? entry.size * 1000.0 / dlElapsed : 0;
-                                    log("         -> Done (" + entry.size + " bytes, " + formatSpeed(avgSpeed) + ")");
-                                    updated++;
-                                } else {
-                                    log("  [FAIL]  " + relPath + ": cannot move file");
-                                    tmpFile.delete();
-                                    failed++;
-                                }
+                    if (ok) {
+                        String dlHash = sha256(tmpFile);
+                        if (dlHash != null && dlHash.equals(entry.hash)) {
+                            if (replaceDownloadedFile(tmpFile, localFile, relPath)) {
+                                long dlElapsed = System.currentTimeMillis() - dlStart;
+                                double avgSpeed = dlElapsed > 0 ? entry.size * 1000.0 / dlElapsed : 0;
+                                log("         -> Done (" + entry.size + " bytes, " + formatSpeed(avgSpeed) + ")");
+                                updated++;
                             } else {
-                                log("  [FAIL]  " + relPath + ": hash mismatch after download");
+                                log("  [FAIL]  " + relPath + ": cannot move file");
                                 tmpFile.delete();
                                 failed++;
                             }
                         } else {
-                            log("  [FAIL]  " + relPath + ": download failed");
+                            log("  [FAIL]  " + relPath + ": hash mismatch after download");
                             tmpFile.delete();
                             failed++;
                         }
-
-                        // Reset per-file progress bar immediately
-                        resetDownloadProgress();
+                    } else {
+                        log("  [FAIL]  " + relPath + ": download failed");
+                        tmpFile.delete();
+                        failed++;
                     }
 
-                    setStatus("Checked: " + checked + "/" + total, false);
-                    setOverallProgress(total > 0 ? checked * 95 / total : 100);
+                    // Reset per-file progress bar immediately
+                    resetDownloadProgress();
                 }
 
-                // 3. clean stale files
-                log("Cleaning stale files...");
-                cleanStaleFiles(manifestFiles, managedPaths, excludedPaths);
+                setStatus("Checked: " + checked + "/" + total, false);
+                setOverallProgress(total > 0 ? checked * 95 / total : 100);
+            }
 
-                // 4. done — update happened before Minecraft launch, no restart needed
+            // 3. clean stale files
+            log("Cleaning stale files...");
+            cleanStaleFiles(manifestFiles, managedPaths, excludedPaths);
+
+            return new UpdateResult(updated, failed);
+        }
+
+        /** Runs the update off the EDT and applies published UI events on it. */
+        private final class UpdateWorker extends SwingWorker<UpdateResult, UiEvent> {
+            void emit(UiEvent event) {
+                publish(event);
+            }
+
+            @Override
+            protected UpdateResult doInBackground() throws Exception {
+                return performUpdate();
+            }
+
+            @Override
+            protected void process(List<UiEvent> events) {
+                for (UiEvent event : events) applyUiEvent(event);
+            }
+
+            @Override
+            protected void done() {
                 stopDownloadRefreshTimer();
-                final int finalUpdated = updated;
-                final int finalFailed = failed;
-                setOverallProgress(100);
-
-                if (finalFailed > 0) {
-                    SwingUtilities.invokeLater(() -> {
-                        setStatus("Update finished with " + finalFailed + " error(s)", false);
-                        log("[FATAL] " + finalFailed + " file(s) failed to update, killing Minecraft process...");
+                try {
+                    UpdateResult result = get();
+                    setOverallProgress(100);
+                    if (result.failed > 0) {
+                        setStatus("Update finished with " + result.failed + " error(s)", false);
+                        log("[FATAL] " + result.failed + " file(s) failed to update, killing Minecraft process...");
                         new javax.swing.Timer(2000, ev -> System.exit(1)).start();
-                    });
-                } else if (finalUpdated > 0) {
-                    SwingUtilities.invokeLater(() -> {
-                        setStatus("Updated " + finalUpdated + " file(s), launching Minecraft...", false);
+                    } else if (result.updated > 0) {
+                        setStatus("Updated " + result.updated + " file(s), launching Minecraft...", false);
                         autoClose(2000);
-                    });
-                } else {
-                    SwingUtilities.invokeLater(() -> {
+                    } else {
                         setStatus("Already up to date, launching Minecraft...", false);
                         autoClose(1000);
-                    });
+                    }
+                } catch (Exception e) {
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    showError("Update error: " + cause.getMessage());
+                    cause.printStackTrace();
                 }
-
-            } catch (Exception e) {
-                stopDownloadRefreshTimer();
-                showError("Update error: " + e.getMessage());
-                e.printStackTrace();
-                // showError will System.exit() — do NOT release the latch
             }
         }
 
@@ -1041,17 +1138,11 @@ public class UpdateAgent {
         // ── GUI helpers ──────────────────────────────────────────
 
         private void setStatus(String text, boolean indeterminate) {
-            runOnEdt(() -> {
-                lblStatus.setText(text);
-                progressBar.setIndeterminate(indeterminate);
-            });
+            dispatchUiEvent(UiEvent.status(text, indeterminate));
         }
 
         private void log(String msg) {
-            runOnEdt(() -> {
-                logArea.append(msg + "\n");
-                logArea.setCaretPosition(logArea.getDocument().getLength());
-            });
+            dispatchUiEvent(UiEvent.log(msg));
         }
 
         private void showError(String msg) {
