@@ -271,17 +271,44 @@ public class UpdateAgent {
 
         /** Update the server label in the top panel. */
         private void updateServerLabel() {
-            String display = serverUrls.size() <= 1
-                    ? "Server: " + currentServer()
-                    : "Servers (" + serverUrls.size() + "): " + currentServer();
-            serverLabel.setText(display);
+            runOnEdt(() -> {
+                String display = serverUrls.size() <= 1
+                        ? "Server: " + currentServer()
+                        : "Servers (" + serverUrls.size() + "): " + currentServer();
+                serverLabel.setText(display);
+            });
+        }
+
+        /** Run a UI mutation on Swing's Event Dispatch Thread. */
+        private void runOnEdt(Runnable action) {
+            if (SwingUtilities.isEventDispatchThread()) {
+                action.run();
+            } else {
+                SwingUtilities.invokeLater(action);
+            }
+        }
+
+        /** Set the overall progress bar to a determinate percentage. */
+        private void setOverallProgress(int value) {
+            int clamped = Math.max(0, Math.min(100, value));
+            runOnEdt(() -> {
+                progressBar.setIndeterminate(false);
+                progressBar.setValue(clamped);
+            });
         }
 
         /** Reset the per-file download progress bar and speed label. */
         private void resetDownloadProgress() {
-            dlProgressBar.setValue(0);
-            dlProgressBar.setString("");
-            lblDlSpeed.setText(" ");
+            runOnEdt(() -> {
+                dlProgressBar.setValue(0);
+                dlProgressBar.setString("");
+                lblDlSpeed.setText(" ");
+            });
+        }
+
+        /** Stop the Swing refresh timer from the EDT. */
+        private void stopDownloadRefreshTimer() {
+            runOnEdt(dlRefreshTimer::stop);
         }
 
         private void initUI() {
@@ -448,8 +475,7 @@ public class UpdateAgent {
                 }
 
                 // 2. check and download each file
-                progressBar.setIndeterminate(false);
-                progressBar.setValue(0);
+                setOverallProgress(0);
                 int total = manifestFiles.size();
                 int checked = 0;
                 int updated = 0;
@@ -464,7 +490,7 @@ public class UpdateAgent {
                         log("  [REJECT] " + relPath + " (unsafe manifest path)");
                         failed++;
                         setStatus("Rejected unsafe path: " + checked + "/" + total, false);
-                        progressBar.setValue(total > 0 ? checked * 95 / total : 100);
+                        setOverallProgress(total > 0 ? checked * 95 / total : 100);
                         continue;
                     }
                     boolean needDownload = false;
@@ -530,11 +556,11 @@ public class UpdateAgent {
                         }
 
                         // Reset per-file progress bar immediately
-                        SwingUtilities.invokeLater(this::resetDownloadProgress);
+                        resetDownloadProgress();
                     }
 
                     setStatus("Checked: " + checked + "/" + total, false);
-                    progressBar.setValue(total > 0 ? checked * 95 / total : 100);
+                    setOverallProgress(total > 0 ? checked * 95 / total : 100);
                 }
 
                 // 3. clean stale files
@@ -542,10 +568,10 @@ public class UpdateAgent {
                 cleanStaleFiles(manifestFiles, managedPaths, excludedPaths);
 
                 // 4. done — update happened before Minecraft launch, no restart needed
-                dlRefreshTimer.stop();
+                stopDownloadRefreshTimer();
                 final int finalUpdated = updated;
                 final int finalFailed = failed;
-                progressBar.setValue(100);
+                setOverallProgress(100);
 
                 if (finalFailed > 0) {
                     SwingUtilities.invokeLater(() -> {
@@ -566,7 +592,7 @@ public class UpdateAgent {
                 }
 
             } catch (Exception e) {
-                dlRefreshTimer.stop();
+                stopDownloadRefreshTimer();
                 showError("Update error: " + e.getMessage());
                 e.printStackTrace();
                 // showError will System.exit() — do NOT release the latch
@@ -604,7 +630,7 @@ public class UpdateAgent {
                     if (idx != currentServerIndex) {
                         log("Switched to server: " + serverUrls.get(idx));
                         currentServerIndex = idx;
-                        SwingUtilities.invokeLater(this::updateServerLabel);
+                        updateServerLabel();
                     }
                     return result;
                 } catch (IOException e) {
@@ -647,7 +673,7 @@ public class UpdateAgent {
                     if (idx != currentServerIndex) {
                         log("Switched to server: " + serverUrls.get(idx));
                         currentServerIndex = idx;
-                        SwingUtilities.invokeLater(this::updateServerLabel);
+                        updateServerLabel();
                     }
                     return true;
                 }
@@ -912,18 +938,20 @@ public class UpdateAgent {
         // ═══════════════════════════════════════════════════════════
 
         private void autoClose(int delayMs) {
-            progressBar.setIndeterminate(false);
-            if (debug) {
-                // Debug mode: release latch so Minecraft starts, but keep window open
-                latch.countDown();
-                btnClose.setEnabled(true);
-                log("[DEBUG] Update check done. Window stays open for inspection.");
-            } else {
-                new javax.swing.Timer(delayMs, e -> {
+            runOnEdt(() -> {
+                progressBar.setIndeterminate(false);
+                if (debug) {
+                    // Debug mode: release latch so Minecraft starts, but keep window open
                     latch.countDown();
-                    dispose();
-                }).start();
-            }
+                    btnClose.setEnabled(true);
+                    log("[DEBUG] Update check done. Window stays open for inspection.");
+                } else {
+                    new javax.swing.Timer(delayMs, e -> {
+                        latch.countDown();
+                        dispose();
+                    }).start();
+                }
+            });
         }
 
         // ── Data class ────────────────────────────────────────────
@@ -992,7 +1020,7 @@ public class UpdateAgent {
 
             boolean ok = httpDownloadWithFallback("/api/agent", newJar);
             dlActive = false;
-            SwingUtilities.invokeLater(this::resetDownloadProgress);
+            resetDownloadProgress();
 
             if (!ok) {
                 log("  [FAIL]  Agent download failed");
@@ -1013,22 +1041,22 @@ public class UpdateAgent {
         // ── GUI helpers ──────────────────────────────────────────
 
         private void setStatus(String text, boolean indeterminate) {
-            SwingUtilities.invokeLater(() -> {
+            runOnEdt(() -> {
                 lblStatus.setText(text);
                 progressBar.setIndeterminate(indeterminate);
             });
         }
 
         private void log(String msg) {
-            SwingUtilities.invokeLater(() -> {
+            runOnEdt(() -> {
                 logArea.append(msg + "\n");
                 logArea.setCaretPosition(logArea.getDocument().getLength());
             });
         }
 
         private void showError(String msg) {
-            dlRefreshTimer.stop();
-            SwingUtilities.invokeLater(() -> {
+            runOnEdt(() -> {
+                dlRefreshTimer.stop();
                 resetDownloadProgress();
                 log("[ERROR] " + msg);
                 setStatus("Update failed", false);
