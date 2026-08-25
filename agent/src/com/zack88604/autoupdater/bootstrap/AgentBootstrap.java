@@ -17,20 +17,14 @@ package com.zack88604.autoupdater.bootstrap;
  *   cd build && jar cfm ../UpdateAgent.jar ../META-INF/MANIFEST.MF *.class
  */
 
+import com.zack88604.autoupdater.application.UpdateEvent;
+import com.zack88604.autoupdater.application.UpdateService;
 import com.zack88604.autoupdater.config.AgentConfig;
-import com.zack88604.autoupdater.domain.FileEntry;
 import com.zack88604.autoupdater.domain.UpdateResult;
-import com.zack88604.autoupdater.infrastructure.files.FileManager;
-import com.zack88604.autoupdater.infrastructure.http.ServerClient;
-import com.zack88604.autoupdater.infrastructure.json.JsonParser;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
-import java.io.File;
-import java.io.IOException;
 import java.lang.instrument.Instrumentation;
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -46,8 +40,7 @@ public final class AgentBootstrap {
     public static void premain(String args, Instrumentation inst) {
         AgentConfig config = AgentConfig.resolve(args);
 
-        // Keep these legacy properties populated until the remaining Swing
-        // updater code is moved out of this bootstrap.
+        // Keep legacy properties populated for the compatible launcher entry point.
         System.setProperty(PROP_GAME_DIR, config.getGameDir());
         System.setProperty(PROP_SERVER, config.getServer());
         if (config.isDebug()) {
@@ -62,18 +55,6 @@ public final class AgentBootstrap {
             latch.await();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-        }
-    }
-
-    // ── Utility: get own JAR path ──────────────────────────────
-
-    private static String getMyJarPath() {
-        try {
-            String path = AgentBootstrap.class.getProtectionDomain()
-                    .getCodeSource().getLocation().getPath();
-            return URLDecoder.decode(path, StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            return null;
         }
     }
 
@@ -103,8 +84,9 @@ public final class AgentBootstrap {
         private long dlLastTime  = 0;
 
         private String gameDir;
-        private FileManager fileManager;
-        private ServerClient serverClient;
+        private UpdateService updateService;
+        private List<String> serverUrls;
+        private String currentServer;
         private final CountDownLatch latch;
         private final boolean debug;
         private JLabel serverLabel;
@@ -175,26 +157,9 @@ public final class AgentBootstrap {
             // The bootstrap has already resolved configuration and populated this property.
             List<String> configuredServers = parseServerList(
                     System.getProperty(PROP_SERVER, AgentConfig.DEFAULT_SERVER));
-            fileManager = new FileManager(new File(gameDir));
-            serverClient = new ServerClient(configuredServers, new ServerClient.Listener() {
-                @Override
-                public void onLog(String message) {
-                    log(message);
-                }
-
-                @Override
-                public void onServerChanged(List<String> serverUrls, String currentServer) {
-                    updateServerLabel();
-                }
-
-                @Override
-                public void onDownloadProgress(long totalBytes, long downloadedBytes) {
-                    if (totalBytes > 0) {
-                        dlTotalBytes = totalBytes;
-                    }
-                    dlDownloadedBytes = downloadedBytes;
-                }
-            });
+            updateService = new UpdateService(gameDir, configuredServers);
+            serverUrls = updateService.getServerUrls();
+            currentServer = updateService.getCurrentServer();
         }
 
         /** Parse comma-separated server URLs, trimming whitespace from each. */
@@ -214,12 +179,11 @@ public final class AgentBootstrap {
 
         /** Get the currently active server URL. */
         private String currentServer() {
-            return serverClient.getCurrentServer();
+            return currentServer;
         }
 
         /** Update the server label in the top panel. */
         private void updateServerLabel() {
-            List<String> serverUrls = serverClient.getServerUrls();
             String display = serverUrls.size() <= 1
                     ? "Server: " + currentServer()
                     : "Servers (" + serverUrls.size() + "): " + currentServer();
@@ -410,149 +374,43 @@ public final class AgentBootstrap {
 
         // ── update flow (pure Java HTTP, no external scripts) ─────
 
+        /** Translate toolkit-neutral use-case events into the existing Swing event stream. */
+        private void onUpdateEvent(UpdateEvent event) {
+            if (event instanceof UpdateEvent.StatusChanged) {
+                UpdateEvent.StatusChanged status = (UpdateEvent.StatusChanged) event;
+                setStatus(status.getStatus(), status.isIndeterminate());
+            } else if (event instanceof UpdateEvent.LogMessage) {
+                log(((UpdateEvent.LogMessage) event).getMessage());
+            } else if (event instanceof UpdateEvent.OverallProgressChanged) {
+                setOverallProgress(((UpdateEvent.OverallProgressChanged) event).getPercentage());
+            } else if (event instanceof UpdateEvent.ServerChanged) {
+                UpdateEvent.ServerChanged server = (UpdateEvent.ServerChanged) event;
+                serverUrls = server.getServerUrls();
+                currentServer = server.getCurrentServer();
+                updateServerLabel();
+            } else if (event instanceof UpdateEvent.DownloadProgressChanged) {
+                UpdateEvent.DownloadProgressChanged progress =
+                        (UpdateEvent.DownloadProgressChanged) event;
+                if (!progress.isActive()) {
+                    dlActive = false;
+                    resetDownloadProgress();
+                    return;
+                }
+                boolean starting = !dlActive;
+                dlTotalBytes = progress.getTotalBytes();
+                dlDownloadedBytes = progress.getDownloadedBytes();
+                dlActive = true;
+                if (starting) {
+                    dlLastBytes = 0;
+                    dlLastTime = System.currentTimeMillis();
+                }
+            }
+        }
+
         private void startUpdate() {
             dlRefreshTimer.start();
             updateWorker = new UpdateWorker();
             updateWorker.execute();
-        }
-
-        /** Performs blocking network and file work; no Swing components are touched here. */
-        private UpdateResult performUpdate() throws Exception {
-            List<String> serverUrls = serverClient.getServerUrls();
-            log("Servers (" + serverUrls.size() + "):");
-            for (int i = 0; i < serverUrls.size(); i++) {
-                log("  [" + (i + 1) + "] " + serverUrls.get(i));
-            }
-            log("Game dir: " + gameDir);
-
-            // 1. fetch manifest (with multi-server fallback)
-            setStatus("Checking for updates...", true);
-            log("Fetching manifest...");
-            String manifestJson = serverClient.getWithFallback("/api/v2/manifest");
-
-            // 0. self-update check — must happen before regular file sync
-            checkSelfUpdate(manifestJson);
-
-            String filesArray = JsonParser.getArray(manifestJson, "files");
-            if (filesArray == null) {
-                throw new IOException("Cannot parse manifest");
-            }
-
-            List<FileEntry> manifestFiles = parseFileEntries(filesArray);
-            log("Manifest contains " + manifestFiles.size() + " file(s)");
-
-            String managedArray = JsonParser.getArray(manifestJson, "managed_paths");
-            List<String> managedPaths = JsonParser.parseStringArray(
-                    managedArray != null ? managedArray : "");
-            log("Managed paths:");
-            for (String p : managedPaths) log("  - " + p);
-
-            String excludedArray = JsonParser.getArray(manifestJson, "excluded_paths");
-            List<String> excludedPaths = JsonParser.parseStringArray(
-                    excludedArray != null ? excludedArray : "");
-            if (!excludedPaths.isEmpty()) {
-                log("Excluded paths:");
-                for (String p : excludedPaths) log("  - " + p);
-            }
-
-            // 2. check and download each file
-            setOverallProgress(0);
-            int total = manifestFiles.size();
-            int checked = 0;
-            int updated = 0;
-            int failed = 0;
-
-            for (FileEntry entry : manifestFiles) {
-                checked++;
-                String relPath = entry.getPath();
-
-                File localFile = fileManager.resolveManagedFile(relPath);
-                if (localFile == null) {
-                    log("  [REJECT] " + relPath + " (unsafe manifest path)");
-                    failed++;
-                    setStatus("Rejected unsafe path: " + checked + "/" + total, false);
-                    setOverallProgress(total > 0 ? checked * 95 / total : 100);
-                    continue;
-                }
-                boolean needDownload = false;
-
-                if (!localFile.isFile()) {
-                    log("  [MISS]  " + relPath);
-                    needDownload = true;
-                } else {
-                    String localHash = fileManager.sha256(localFile);
-                    if (localHash == null) {
-                        log("  [WARN]  " + relPath + " (cannot read, re-downloading)");
-                        needDownload = true;
-                    } else if (!localHash.equals(entry.getSha256())) {
-                        log("  [DIFF]  " + relPath + " (hash mismatch)");
-                        needDownload = true;
-                    } else {
-                        log("  [OK]    " + relPath);
-                    }
-                }
-
-                if (needDownload) {
-                    setStatus("Downloading: " + relPath, false);
-                    log("         -> Downloading " + relPath + "...");
-                    File parent = localFile.getParentFile();
-                    if (parent != null && !parent.isDirectory()) parent.mkdirs();
-                    File tmpFile = new File(localFile.getPath() + ".tmp");
-
-                    // Track per-file download progress
-                    dlTotalBytes = entry.getSize();
-                    dlDownloadedBytes = 0;
-                    dlActive = true;
-                    dlLastBytes = 0;
-                    dlLastTime = System.currentTimeMillis();
-                    long dlStart = dlLastTime;
-
-                    // URL-encode each path segment for the download URL
-                    String encodedPath = ServerClient.encodePath(relPath);
-                    boolean ok = serverClient.downloadWithFallback(
-                            "/api/files/" + encodedPath, tmpFile);
-                    dlActive = false;
-
-                    if (ok) {
-                        String dlHash = fileManager.sha256(tmpFile);
-                        if (dlHash != null && dlHash.equals(entry.getSha256())) {
-                            try {
-                                fileManager.replaceDownloadedFile(tmpFile, localFile);
-                                long dlElapsed = System.currentTimeMillis() - dlStart;
-                                double avgSpeed = dlElapsed > 0 ? entry.getSize() * 1000.0 / dlElapsed : 0;
-                                log("         -> Done (" + entry.getSize() + " bytes, " + formatSpeed(avgSpeed) + ")");
-                                updated++;
-                            } catch (IOException e) {
-                                log("  [FAIL]  " + relPath + ": cannot replace file ("
-                                        + e.getMessage() + ")");
-                                log("  [FAIL]  " + relPath + ": cannot move file");
-                                tmpFile.delete();
-                                failed++;
-                            }
-                        } else {
-                            log("  [FAIL]  " + relPath + ": hash mismatch after download");
-                            tmpFile.delete();
-                            failed++;
-                        }
-                    } else {
-                        log("  [FAIL]  " + relPath + ": download failed");
-                        tmpFile.delete();
-                        failed++;
-                    }
-
-                    // Reset per-file progress bar immediately
-                    resetDownloadProgress();
-                }
-
-                setStatus("Checked: " + checked + "/" + total, false);
-                setOverallProgress(total > 0 ? checked * 95 / total : 100);
-            }
-
-            // 3. clean stale files
-            log("Cleaning stale files...");
-            fileManager.cleanStaleFiles(manifestFiles, managedPaths, excludedPaths, this::log);
-
-            return new UpdateResult(updated, failed);
         }
 
         /** Runs the update off the EDT and applies published UI events on it. */
@@ -563,7 +421,7 @@ public final class AgentBootstrap {
 
             @Override
             protected UpdateResult doInBackground() throws Exception {
-                return performUpdate();
+                return updateService.run(UpdateGUI.this::onUpdateEvent);
             }
 
             @Override
@@ -597,34 +455,6 @@ public final class AgentBootstrap {
         }
 
         // ═══════════════════════════════════════════════════════════
-        //   Manifest mapping
-        // ═══════════════════════════════════════════════════════════
-
-        private static List<FileEntry> parseFileEntries(String filesArray) {
-            List<FileEntry> list = new ArrayList<>();
-            // Split top-level JSON objects
-            int depth = 0, start = -1;
-            for (int i = 0; i < filesArray.length(); i++) {
-                char c = filesArray.charAt(i);
-                if (c == '{') { if (depth == 0) start = i; depth++; }
-                else if (c == '}') {
-                    depth--;
-                    if (depth == 0 && start >= 0) {
-                        String obj = filesArray.substring(start, i + 1);
-                        String path = JsonParser.getString(obj, "path");
-                        String hash = JsonParser.getString(obj, "hash");
-                        int size = JsonParser.getInt(obj, "size", -1);
-                        if (path != null && hash != null && size >= 0) {
-                            list.add(new FileEntry(path, hash, size));
-                        }
-                        start = -1;
-                    }
-                }
-            }
-            return list;
-        }
-
-        // ═══════════════════════════════════════════════════════════
         //   Auto close
         // ═══════════════════════════════════════════════════════════
 
@@ -645,80 +475,6 @@ public final class AgentBootstrap {
             });
         }
 
-
-        // ── Self-update ─────────────────────────────────────────
-
-        /** Check manifest for agent update; download if newer. */
-        private void checkSelfUpdate(String manifestJson) {
-            String agentObj = JsonParser.getObject(manifestJson, "agent");
-            if (agentObj == null) {
-                log("  [SKIP]  No agent info in manifest");
-                return;
-            }
-            String agentHash = JsonParser.getString(agentObj, "hash");
-            long agentSize = JsonParser.getLong(agentObj, "size", -1);
-            if (agentHash == null || agentSize <= 0) {
-                log("  [SKIP]  Incomplete agent info in manifest");
-                return;
-            }
-
-            String myJarPath = getMyJarPath();
-            if (myJarPath == null) {
-                log("  [SKIP]  Cannot determine agent JAR path");
-                return;
-            }
-
-            File myJar = new File(myJarPath);
-            if (!myJar.isFile()) {
-                log("  [SKIP]  Agent JAR not found at: " + myJarPath);
-                return;
-            }
-
-            log("Checking agent update...");
-            log("  My path:    " + myJarPath);
-            String myHash = fileManager.sha256(myJar);
-            if (myHash == null) {
-                log("  [SKIP]  Cannot compute local agent hash");
-                return;
-            }
-            if (myHash.equals(agentHash)) {
-                log("  [OK]    Agent is up to date");
-                return;
-            }
-
-            log("  [UPDATE] New agent version available!");
-            log("  Remote: " + agentHash);
-            log("  Local:  " + myHash);
-            setStatus("Downloading agent update...", false);
-
-            File newJar = new File(myJarPath + ".new");
-            if (newJar.exists()) newJar.delete();
-
-            dlTotalBytes = agentSize;
-            dlDownloadedBytes = 0;
-            dlActive = true;
-            dlLastBytes = 0;
-            dlLastTime = System.currentTimeMillis();
-
-            boolean ok = serverClient.downloadWithFallback("/api/agent", newJar);
-            dlActive = false;
-            resetDownloadProgress();
-
-            if (!ok) {
-                log("  [FAIL]  Agent download failed");
-                newJar.delete();
-                return;
-            }
-
-            String dlHash = fileManager.sha256(newJar);
-            if (dlHash == null || !dlHash.equals(agentHash)) {
-                log("  [FAIL]  Agent hash mismatch after download");
-                newJar.delete();
-                return;
-            }
-
-            log("  [OK]    Agent downloaded, will replace on next restart");
-        }
 
         // ── GUI helpers ──────────────────────────────────────────
 

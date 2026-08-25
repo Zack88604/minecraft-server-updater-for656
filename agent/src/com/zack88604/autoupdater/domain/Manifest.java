@@ -16,13 +16,23 @@ public final class Manifest {
     private final List<String> managedPaths;
     private final List<String> excludedPaths;
     private final AgentArtifact agentArtifact;
+    private final boolean fileListPresent;
+    private final boolean agentSectionPresent;
 
     public Manifest(List<FileEntry> files, List<String> managedPaths,
                     List<String> excludedPaths, AgentArtifact agentArtifact) {
+        this(files, managedPaths, excludedPaths, agentArtifact, true, agentArtifact != null);
+    }
+
+    public Manifest(List<FileEntry> files, List<String> managedPaths,
+                    List<String> excludedPaths, AgentArtifact agentArtifact,
+                    boolean fileListPresent, boolean agentSectionPresent) {
         this.files = immutableCopy(files, "files");
         this.managedPaths = immutableCopy(managedPaths, "managedPaths");
         this.excludedPaths = immutableCopy(excludedPaths, "excludedPaths");
         this.agentArtifact = agentArtifact;
+        this.fileListPresent = fileListPresent;
+        this.agentSectionPresent = agentSectionPresent;
     }
 
     public List<FileEntry> getFiles() {
@@ -40,6 +50,16 @@ public final class Manifest {
     /** Return the optional self-update artifact, or {@code null} when absent. */
     public AgentArtifact getAgentArtifact() {
         return agentArtifact;
+    }
+
+    /** Whether the source JSON contained a top-level {@code files} array. */
+    public boolean isFileListPresent() {
+        return fileListPresent;
+    }
+
+    /** Whether the source JSON contained an {@code agent} metadata object. */
+    public boolean isAgentSectionPresent() {
+        return agentSectionPresent;
     }
 
     private static <T> List<T> immutableCopy(List<T> source, String name) {
