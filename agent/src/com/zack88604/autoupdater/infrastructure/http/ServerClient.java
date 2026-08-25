@@ -29,6 +29,11 @@ public final class ServerClient {
         void onServerChanged(List<String> serverUrls, String currentServer);
 
         void onDownloadProgress(long totalBytes, long downloadedBytes);
+
+        /** Pause or cancel an in-flight transfer at a safe checkpoint. */
+        default void checkpoint() {
+            // Callers without lifecycle control keep the legacy behavior.
+        }
     }
 
     private final List<String> serverUrls;
@@ -66,6 +71,7 @@ public final class ServerClient {
         IOException lastException = null;
         int startIndex = currentServerIndex;
         for (int i = 0; i < serverUrls.size(); i++) {
+            listener.checkpoint();
             int index = (startIndex + i) % serverUrls.size();
             String server = serverUrls.get(index);
             try {
@@ -89,6 +95,7 @@ public final class ServerClient {
         int startIndex = currentServerIndex;
         long[] downloadedBytes = {0};
         for (int i = 0; i < serverUrls.size(); i++) {
+            listener.checkpoint();
             int index = (startIndex + i) % serverUrls.size();
             String server = serverUrls.get(index);
             if (index != currentServerIndex) {
@@ -114,6 +121,7 @@ public final class ServerClient {
     }
 
     private String get(String url) throws IOException {
+        listener.checkpoint();
         HttpURLConnection connection =
                 (HttpURLConnection) URI.create(url).toURL().openConnection();
         connection.setRequestMethod("GET");
@@ -125,6 +133,7 @@ public final class ServerClient {
             StringBuilder response = new StringBuilder();
             String line;
             while ((line = reader.readLine()) != null) {
+                listener.checkpoint();
                 response.append(line);
             }
             return response.toString();
@@ -135,6 +144,7 @@ public final class ServerClient {
 
     private boolean download(String url, File destination, long[] downloadedBytes) {
         try {
+            listener.checkpoint();
             HttpURLConnection connection =
                     (HttpURLConnection) URI.create(url).toURL().openConnection();
             connection.setRequestMethod("GET");
@@ -149,6 +159,7 @@ public final class ServerClient {
                 byte[] buffer = new byte[8192];
                 int read;
                 while ((read = input.read(buffer)) != -1) {
+                    listener.checkpoint();
                     output.write(buffer, 0, read);
                     downloadedBytes[0] += read;
                     listener.onDownloadProgress(

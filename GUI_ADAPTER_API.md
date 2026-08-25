@@ -161,21 +161,38 @@ public final class MyGuiView implements UpdateView {
     private final JFrame frame = new JFrame("Minecraft Updater");
     private final JLabel status = new JLabel();
     private final JProgressBar progress = new JProgressBar();
+    private UpdateUiState currentState = UpdateUiState.initial();
 
     public MyGuiView(UpdateViewActions actions, String gameDir, boolean debug) {
         this.actions = actions;
         // ... assemble the window ...
         progress.setStringPainted(true);
+        frame.setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
 
         // Report user intent back to the controller:
         frame.addWindowListener(new java.awt.event.WindowAdapter() {
             @Override public void windowClosing(java.awt.event.WindowEvent e) {
-                actions.requestClose();            // user asked to close
+                requestWindowClose();
             }
             @Override public void windowClosed(java.awt.event.WindowEvent e) {
                 actions.notifyWindowClosed();      // native window really closed
             }
         });
+    }
+
+    private void requestWindowClose() {
+        if (currentState.getClosePolicy() == ClosePolicy.CONFIRM) {
+            actions.beginCloseConfirmation();
+            int choice = JOptionPane.showConfirmDialog(frame,
+                    "Stop this update, restore changed files, and launch Minecraft?",
+                    "Update in progress", JOptionPane.YES_NO_OPTION,
+                    JOptionPane.WARNING_MESSAGE);
+            if (choice != JOptionPane.YES_OPTION) {
+                actions.cancelCloseConfirmation();
+                return;
+            }
+        }
+        actions.requestClose();
     }
 
     @Override
@@ -185,6 +202,7 @@ public final class MyGuiView implements UpdateView {
 
     @Override
     public void render(UpdateUiState state) {
+        currentState = state;
         // `state` is a complete snapshot — render it whole.
         status.setText(state.getStatus());
         if (state.isOverallProgressIndeterminate()) {
@@ -219,18 +237,24 @@ Your view never decides outcomes; it only reports **intent** through
 
 | Method | When to call |
 |--------|--------------|
-| `requestClose()` | The user asked to close (clicked ✕ or a Cancel button). |
+| `beginCloseConfirmation()` | Immediately before opening a `CONFIRM` dialog. The worker pauses at its next safe checkpoint. |
+| `cancelCloseConfirmation()` | When the user rejects or dismisses that dialog. The worker resumes. |
+| `requestClose()` | After the user confirmed closing, or immediately when the policy is `ALLOW`. |
 | `notifyWindowClosed()` | The native window has actually finished closing. |
 
 The controller applies the current **close policy** from the state:
 
 | `ClosePolicy` | When | What a close does |
 |---------------|------|-------------------|
-| `CONFIRM` | Update in progress | Show a toolkit-specific confirmation dialog first. If confirmed, `requestClose()` releases the latch (Minecraft continues) and closes the view. |
+| `CONFIRM` | Update in progress | Set the native close operation to "do nothing", call `beginCloseConfirmation()` immediately before showing a toolkit-specific warning, and call `cancelCloseConfirmation()` if it is rejected. If confirmed, call `requestClose()`: the updater cancels, restores every file changed in this update, then starts Minecraft and closes the view. |
 | `ALLOW` | Update succeeded | Closing is allowed; the latch is released and the window closes. |
 | `EXIT_FAILURE` | Update failed | Any close (requested or native) calls `System.exit(1)` — **Minecraft will not start**. |
 
 > Never release the latch or call `System.exit` yourself. The controller owns both.
+
+`beginCloseConfirmation()` and `cancelCloseConfirmation()` are default methods, so
+existing adapters remain source- and binary-compatible. To pause work while their
+confirmation dialog is visible, adapters must adopt the sequence above.
 
 ---
 
@@ -356,8 +380,10 @@ All three are invoked on your UI thread through your dispatcher.
 ### 4.5 `UpdateViewActions` (interface)
 
 ```java
-void requestClose();       // the user asked to close the window
-void notifyWindowClosed(); // the native window finished closing
+void beginCloseConfirmation();  // pause before showing a CONFIRM dialog
+void cancelCloseConfirmation(); // resume after the dialog is rejected
+void requestClose();            // the user confirmed closing
+void notifyWindowClosed();      // the native window finished closing
 ```
 
 Implemented by the controller — see [Step 5](#step-5--handle-close-correctly).

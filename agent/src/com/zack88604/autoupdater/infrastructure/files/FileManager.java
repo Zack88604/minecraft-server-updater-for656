@@ -51,11 +51,22 @@ public final class FileManager {
 
     /** Return the file SHA-256 in lowercase hexadecimal, or null if unreadable. */
     public String sha256(File file) {
+        return sha256(file, null);
+    }
+
+    /**
+     * Return the file SHA-256 while invoking an optional pause/cancellation
+     * checkpoint between read chunks.
+     */
+    public String sha256(File file, Runnable checkpoint) {
         try (FileInputStream input = new FileInputStream(file)) {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] buffer = new byte[8192];
             int read;
             while ((read = input.read(buffer)) != -1) {
+                if (checkpoint != null) {
+                    checkpoint.run();
+                }
                 digest.update(buffer, 0, read);
             }
             StringBuilder hash = new StringBuilder();
@@ -63,6 +74,8 @@ public final class FileManager {
                 hash.append(String.format("%02x", value));
             }
             return hash.toString();
+        } catch (RuntimeException exception) {
+            throw exception;
         } catch (Exception e) {
             return null;
         }
@@ -70,6 +83,18 @@ public final class FileManager {
 
     /** Atomically replace a managed file where supported, otherwise use a normal replacement move. */
     public void replaceDownloadedFile(File temporaryFile, File localFile) throws IOException {
+        replaceDownloadedFile(temporaryFile, localFile, null);
+    }
+
+    /**
+     * Replace a file after capturing its original state in the active
+     * transaction. If capture fails, the target is left unchanged.
+     */
+    public void replaceDownloadedFile(File temporaryFile, File localFile,
+                                      FileTransaction transaction) throws IOException {
+        if (transaction != null) {
+            transaction.capture(localFile);
+        }
         try {
             Files.move(temporaryFile.toPath(), localFile.toPath(),
                     StandardCopyOption.ATOMIC_MOVE,
@@ -83,11 +108,28 @@ public final class FileManager {
     /** Delete managed files that are not present in the manifest. */
     public void cleanStaleFiles(List<FileEntry> manifestFiles, List<String> managedPaths,
                                 List<String> excludedPaths, Consumer<String> log) {
-        Set<String> manifestSet = new HashSet<>();
+        cleanStaleFiles(manifestFiles, managedPaths, excludedPaths, log,
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        // No pause or cancellation control was supplied.
+                    }
+                }, null);
+    }
+
+    /**
+     * Delete stale managed files while allowing cooperative pause/cancellation
+     * and rollback capture.
+     */
+    public void cleanStaleFiles(List<FileEntry> manifestFiles, List<String> managedPaths,
+                                List<String> excludedPaths, Consumer<String> log,
+                                Runnable checkpoint, FileTransaction transaction) {
+        Set<String> manifestSet = new HashSet<String>();
         for (FileEntry entry : manifestFiles) {
             manifestSet.add(entry.getPath());
         }
         for (String managedPath : managedPaths) {
+            checkpoint.run();
             if (managedPath.equals("*")) {
                 continue;
             }
@@ -101,7 +143,8 @@ public final class FileManager {
             }
             if (managedPath.endsWith("/")) {
                 if (managedFile.isDirectory()) {
-                    deleteStaleInDirectory(managedFile, manifestSet, excludedPaths, log);
+                    deleteStaleInDirectory(managedFile, manifestSet, excludedPaths, log,
+                            checkpoint, transaction);
                 }
             } else if (managedFile.isFile() && !managedFile.getName().startsWith(".")) {
                 String relativePath = managedPath.replace('\\', '/');
@@ -110,8 +153,7 @@ public final class FileManager {
                     continue;
                 }
                 if (!manifestSet.contains(relativePath)) {
-                    log.accept("  [DEL]   " + relativePath + " (not in manifest)");
-                    managedFile.delete();
+                    deleteStaleFile(managedFile, relativePath, log, transaction);
                 }
             }
         }
@@ -138,14 +180,17 @@ public final class FileManager {
     }
 
     private void deleteStaleInDirectory(File directory, Set<String> manifestSet,
-                                        List<String> excludedPaths, Consumer<String> log) {
+                                        List<String> excludedPaths, Consumer<String> log,
+                                        Runnable checkpoint, FileTransaction transaction) {
         File[] children = directory.listFiles();
         if (children == null) {
             return;
         }
         for (File child : children) {
+            checkpoint.run();
             if (child.isDirectory()) {
-                deleteStaleInDirectory(child, manifestSet, excludedPaths, log);
+                deleteStaleInDirectory(child, manifestSet, excludedPaths, log,
+                        checkpoint, transaction);
             } else if (child.isFile() && !child.getName().startsWith(".")) {
                 String relativePath = child.getAbsolutePath()
                         .substring(gameDirectory.getAbsolutePath().length() + 1)
@@ -155,10 +200,24 @@ public final class FileManager {
                     continue;
                 }
                 if (!manifestSet.contains(relativePath)) {
-                    log.accept("  [DEL]   " + relativePath + " (not in manifest)");
-                    child.delete();
+                    deleteStaleFile(child, relativePath, log, transaction);
                 }
             }
+        }
+    }
+
+    private static void deleteStaleFile(File file, String relativePath, Consumer<String> log,
+                                        FileTransaction transaction) {
+        try {
+            if (transaction != null) {
+                transaction.capture(file);
+            }
+            if (Files.deleteIfExists(file.toPath())) {
+                log.accept("  [DEL]   " + relativePath + " (not in manifest)");
+            }
+        } catch (IOException exception) {
+            log.accept("  [FAIL]  " + relativePath + ": cannot delete stale file ("
+                    + exception.getMessage() + ")");
         }
     }
 }

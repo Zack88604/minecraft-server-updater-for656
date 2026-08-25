@@ -153,10 +153,13 @@ final class SwingUpdateView implements UpdateView {
 
     private void requestWindowClose() {
         if (currentState.getClosePolicy() == ClosePolicy.CONFIRM) {
+            actions.beginCloseConfirmation();
             int choice = JOptionPane.showConfirmDialog(frame,
-                    "The update is still running. Close and launch Minecraft anyway?",
+                    "The update is paused. Close, restore this update's changed files, "
+                            + "and launch Minecraft?",
                     "Update in progress", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
             if (choice != JOptionPane.YES_OPTION) {
+                actions.cancelCloseConfirmation();
                 return;
             }
         }

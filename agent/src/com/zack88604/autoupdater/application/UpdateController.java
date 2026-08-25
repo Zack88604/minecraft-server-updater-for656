@@ -7,6 +7,7 @@ import com.zack88604.autoupdater.gui.api.UpdateUiState;
 import com.zack88604.autoupdater.gui.api.UpdateView;
 import com.zack88604.autoupdater.gui.api.UpdateViewActions;
 
+import java.io.IOException;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 
@@ -24,12 +25,17 @@ public final class UpdateController implements UpdateViewActions {
     private final UpdateService service;
     private final GuiAdapter guiAdapter;
     private final CountDownLatch launchLatch;
+    private final CountDownLatch workerFinished = new CountDownLatch(1);
     private final boolean debug;
+    private final UpdateExecutionControl executionControl = new UpdateExecutionControl();
     private final Object stateLock = new Object();
+    private final Object closeLock = new Object();
 
     private UpdateUiState state = UpdateUiState.initial();
     private volatile UpdateView view;
     private boolean started;
+    private boolean confirmationPaused;
+    private boolean closeRequested;
 
     public UpdateController(UpdateService service, GuiAdapter guiAdapter,
                             CountDownLatch launchLatch, boolean debug) {
@@ -60,33 +66,139 @@ public final class UpdateController implements UpdateViewActions {
     }
 
     @Override
+    public void beginCloseConfirmation() {
+        if (snapshot().getClosePolicy() != ClosePolicy.CONFIRM) {
+            return;
+        }
+        synchronized (closeLock) {
+            if (closeRequested || confirmationPaused) {
+                return;
+            }
+            confirmationPaused = true;
+            executionControl.pause();
+        }
+    }
+
+    @Override
+    public void cancelCloseConfirmation() {
+        synchronized (closeLock) {
+            if (!confirmationPaused || closeRequested) {
+                return;
+            }
+            confirmationPaused = false;
+            executionControl.resume();
+        }
+    }
+
+    @Override
     public void requestClose() {
         ClosePolicy closePolicy = snapshot().getClosePolicy();
         if (closePolicy == ClosePolicy.EXIT_FAILURE) {
             System.exit(1);
             return;
         }
-        launchLatch.countDown();
-        closeView();
+
+        if (closePolicy == ClosePolicy.CONFIRM) {
+            if (markCloseRequested(true)) {
+                rollbackThenLaunch(false);
+            }
+            return;
+        }
+
+        if (markCloseRequested(false)) {
+            launchLatch.countDown();
+            closeView();
+        }
     }
 
     @Override
     public void notifyWindowClosed() {
-        if (snapshot().getClosePolicy() == ClosePolicy.EXIT_FAILURE) {
+        ClosePolicy closePolicy = snapshot().getClosePolicy();
+        if (closePolicy == ClosePolicy.EXIT_FAILURE) {
             System.exit(1);
             return;
         }
+
+        if (closePolicy == ClosePolicy.CONFIRM) {
+            if (markCloseRequested(true)) {
+                rollbackThenLaunch(true);
+            }
+            return;
+        }
+
+        synchronized (closeLock) {
+            if (closeRequested) {
+                return;
+            }
+            closeRequested = true;
+            confirmationPaused = false;
+            executionControl.resume();
+        }
         launchLatch.countDown();
+    }
+
+    private boolean markCloseRequested(boolean cancelUpdate) {
+        synchronized (closeLock) {
+            if (closeRequested) {
+                return false;
+            }
+            closeRequested = true;
+            confirmationPaused = false;
+            if (cancelUpdate) {
+                executionControl.cancel();
+            } else {
+                executionControl.resume();
+            }
+            return true;
+        }
+    }
+
+    private void rollbackThenLaunch(boolean viewAlreadyClosed) {
+        Thread rollback = new Thread(() -> {
+            try {
+                workerFinished.await();
+                service.rollbackCancelledUpdate();
+                launchLatch.countDown();
+                if (!viewAlreadyClosed) {
+                    closeView();
+                }
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                handleRollbackFailure(exception, viewAlreadyClosed);
+            } catch (IOException exception) {
+                handleRollbackFailure(exception, viewAlreadyClosed);
+            }
+        }, "update-rollback");
+        rollback.setDaemon(true);
+        rollback.start();
+    }
+
+    private void handleRollbackFailure(Throwable cause, boolean viewAlreadyClosed) {
+        if (viewAlreadyClosed) {
+            cause.printStackTrace();
+            System.exit(1);
+            return;
+        }
+        synchronized (closeLock) {
+            closeRequested = false;
+        }
+        String message = cause.getMessage() != null ? cause.getMessage() : cause.toString();
+        onUpdateEvent(new UpdateEvent.Failed(
+                "Unable to restore files after cancelling the update: " + message, cause));
     }
 
     private void startWorker() {
         Thread worker = new Thread(() -> {
             try {
-                UpdateResult result = service.run(this::onUpdateEvent);
+                UpdateResult result = service.run(this::onUpdateEvent, executionControl);
                 onUpdateEvent(new UpdateEvent.Completed(result));
+            } catch (UpdateExecutionControl.CancelledException ignored) {
+                // The rollback thread restores the transaction before Minecraft starts.
             } catch (Throwable cause) {
                 String message = cause.getMessage() != null ? cause.getMessage() : cause.toString();
                 onUpdateEvent(new UpdateEvent.Failed("Update error: " + message, cause));
+            } finally {
+                workerFinished.countDown();
             }
         }, "update-worker");
         worker.setDaemon(true);

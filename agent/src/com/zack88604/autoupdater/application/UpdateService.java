@@ -6,6 +6,7 @@ import com.zack88604.autoupdater.domain.Manifest;
 import com.zack88604.autoupdater.domain.UpdateResult;
 import com.zack88604.autoupdater.gui.api.UpdatePhase;
 import com.zack88604.autoupdater.infrastructure.files.FileManager;
+import com.zack88604.autoupdater.infrastructure.files.FileTransaction;
 import com.zack88604.autoupdater.infrastructure.http.ServerClient;
 import com.zack88604.autoupdater.infrastructure.json.ManifestParser;
 
@@ -31,6 +32,9 @@ public final class UpdateService {
     private final String gameDirectory;
     private final List<String> serverUrls;
     private final FileManager fileManager;
+    private final Object transactionLock = new Object();
+
+    private FileTransaction activeTransaction;
 
     public UpdateService(String gameDirectory, List<String> serverUrls) {
         this.gameDirectory = Objects.requireNonNull(gameDirectory, "gameDirectory");
@@ -49,88 +53,130 @@ public final class UpdateService {
         return serverUrls.get(0);
     }
 
+    /** Run the full update flow without pause or cancellation controls. */
+    public UpdateResult run(UpdateListener listener) throws Exception {
+        return run(listener, new UpdateExecutionControl());
+    }
+
     /**
-     * Run the full update flow on the caller's thread.
+     * Run the full update flow with cooperative pause and cancellation
+     * checkpoints.
      *
      * @return the completed file-update result
      * @throws Exception if a manifest cannot be retrieved or parsed
      */
-    public UpdateResult run(UpdateListener listener) throws Exception {
+    public UpdateResult run(UpdateListener listener, UpdateExecutionControl control)
+            throws Exception {
         Objects.requireNonNull(listener, "listener");
-        EventRelay relay = new EventRelay(listener);
-        ServerClient serverClient = new ServerClient(serverUrls, relay);
+        Objects.requireNonNull(control, "control");
 
-        relay.emit(new UpdateEvent.ServerChanged(serverUrls, serverClient.getCurrentServer()));
-        relay.log("Servers (" + serverUrls.size() + "):");
-        for (int index = 0; index < serverUrls.size(); index++) {
-            relay.log("  [" + (index + 1) + "] " + serverUrls.get(index));
-        }
-        relay.log("Game dir: " + gameDirectory);
-
-        relay.status(UpdatePhase.PREPARING, "Checking for updates...", null, true);
-        relay.log("Fetching manifest...");
-        String manifestJson = serverClient.getWithFallback("/api/v2/manifest");
-        Manifest manifest = ManifestParser.parse(manifestJson);
-
-        checkSelfUpdate(relay, serverClient, manifest);
-
-        if (!manifest.isFileListPresent()) {
-            throw new IOException("Cannot parse manifest");
+        FileTransaction transaction = new FileTransaction();
+        synchronized (transactionLock) {
+            activeTransaction = transaction;
         }
 
-        List<FileEntry> manifestFiles = manifest.getFiles();
-        relay.log("Manifest contains " + manifestFiles.size() + " file(s)");
-        relay.log("Managed paths:");
-        for (String path : manifest.getManagedPaths()) {
-            relay.log("  - " + path);
-        }
-        if (!manifest.getExcludedPaths().isEmpty()) {
-            relay.log("Excluded paths:");
-            for (String path : manifest.getExcludedPaths()) {
+        try {
+            EventRelay relay = new EventRelay(listener, control);
+            ServerClient serverClient = new ServerClient(serverUrls, relay);
+
+            relay.emit(new UpdateEvent.ServerChanged(serverUrls, serverClient.getCurrentServer()));
+            relay.log("Servers (" + serverUrls.size() + "):");
+            for (int index = 0; index < serverUrls.size(); index++) {
+                relay.log("  [" + (index + 1) + "] " + serverUrls.get(index));
+            }
+            relay.log("Game dir: " + gameDirectory);
+
+            relay.status(UpdatePhase.PREPARING, "Checking for updates...", null, true);
+            relay.log("Fetching manifest...");
+            String manifestJson = serverClient.getWithFallback("/api/v2/manifest");
+            Manifest manifest = ManifestParser.parse(manifestJson);
+
+            checkSelfUpdate(relay, serverClient, manifest, transaction);
+
+            if (!manifest.isFileListPresent()) {
+                throw new IOException("Cannot parse manifest");
+            }
+
+            List<FileEntry> manifestFiles = manifest.getFiles();
+            relay.log("Manifest contains " + manifestFiles.size() + " file(s)");
+            relay.log("Managed paths:");
+            for (String path : manifest.getManagedPaths()) {
                 relay.log("  - " + path);
             }
-        }
-
-        relay.overallProgress(0);
-        int total = manifestFiles.size();
-        int checked = 0;
-        int updated = 0;
-        int failed = 0;
-
-        for (FileEntry entry : manifestFiles) {
-            checked++;
-            String relativePath = entry.getPath();
-            File localFile = fileManager.resolveManagedFile(relativePath);
-            if (localFile == null) {
-                relay.log("  [REJECT] " + relativePath + " (unsafe manifest path)");
-                failed++;
-                relay.status(UpdatePhase.CHECKING,
-                        "Rejected unsafe path: " + checked + "/" + total, null, false);
-                relay.overallProgress(total > 0 ? checked * 95 / total : 100);
-                continue;
-            }
-
-            boolean needsDownload = needsDownload(relay, localFile, entry);
-            if (needsDownload) {
-                if (updateFile(relay, serverClient, localFile, entry)) {
-                    updated++;
-                } else {
-                    failed++;
+            if (!manifest.getExcludedPaths().isEmpty()) {
+                relay.log("Excluded paths:");
+                for (String path : manifest.getExcludedPaths()) {
+                    relay.log("  - " + path);
                 }
             }
 
-            relay.status(UpdatePhase.CHECKING,
-                    "Checked: " + checked + "/" + total, null, false);
-            relay.overallProgress(total > 0 ? checked * 95 / total : 100);
+            relay.overallProgress(0);
+            int total = manifestFiles.size();
+            int checked = 0;
+            int updated = 0;
+            int failed = 0;
+
+            for (FileEntry entry : manifestFiles) {
+                relay.checkpoint();
+                checked++;
+                String relativePath = entry.getPath();
+                File localFile = fileManager.resolveManagedFile(relativePath);
+                if (localFile == null) {
+                    relay.log("  [REJECT] " + relativePath + " (unsafe manifest path)");
+                    failed++;
+                    relay.status(UpdatePhase.CHECKING,
+                            "Rejected unsafe path: " + checked + "/" + total, null, false);
+                    relay.overallProgress(total > 0 ? checked * 95 / total : 100);
+                    continue;
+                }
+
+                boolean needsDownload = needsDownload(relay, localFile, entry);
+                if (needsDownload) {
+                    if (updateFile(relay, serverClient, localFile, entry, transaction)) {
+                        updated++;
+                    } else {
+                        failed++;
+                    }
+                }
+
+                relay.status(UpdatePhase.CHECKING,
+                        "Checked: " + checked + "/" + total, null, false);
+                relay.overallProgress(total > 0 ? checked * 95 / total : 100);
+            }
+
+            relay.log("Cleaning stale files...");
+            relay.status(UpdatePhase.CLEANING, "Cleaning up…",
+                    "Removing files that are no longer needed", true);
+            fileManager.cleanStaleFiles(manifestFiles, manifest.getManagedPaths(),
+                    manifest.getExcludedPaths(), relay::log, relay::checkpoint, transaction);
+
+            relay.checkpoint();
+            UpdateResult result = new UpdateResult(updated, failed);
+            transaction.commit();
+            clearActiveTransaction(transaction);
+            return result;
+        } catch (UpdateExecutionControl.CancelledException cancellation) {
+            // Keep the transaction available for the controller's rollback step.
+            throw cancellation;
+        } catch (Exception exception) {
+            discardTransaction(transaction, exception);
+            throw exception;
+        } catch (Error error) {
+            discardTransaction(transaction, error);
+            throw error;
         }
+    }
 
-        relay.log("Cleaning stale files...");
-        relay.status(UpdatePhase.CLEANING, "Cleaning up…",
-                "Removing files that are no longer needed", true);
-        fileManager.cleanStaleFiles(manifestFiles, manifest.getManagedPaths(),
-                manifest.getExcludedPaths(), relay::log);
-
-        return new UpdateResult(updated, failed);
+    /** Restore all files changed by a cancelled run. */
+    public void rollbackCancelledUpdate() throws IOException {
+        FileTransaction transaction;
+        synchronized (transactionLock) {
+            transaction = activeTransaction;
+            activeTransaction = null;
+        }
+        if (transaction != null) {
+            transaction.rollback();
+        }
     }
 
     private boolean needsDownload(EventRelay relay, File localFile, FileEntry entry) {
@@ -140,7 +186,7 @@ public final class UpdateService {
             return true;
         }
 
-        String localHash = fileManager.sha256(localFile);
+        String localHash = fileManager.sha256(localFile, relay::checkpoint);
         if (localHash == null) {
             relay.log("  [WARN]  " + relativePath + " (cannot read, re-downloading)");
             return true;
@@ -154,7 +200,8 @@ public final class UpdateService {
     }
 
     private boolean updateFile(EventRelay relay, ServerClient serverClient,
-                               File localFile, FileEntry entry) {
+                               File localFile, FileEntry entry,
+                               FileTransaction transaction) {
         String relativePath = entry.getPath();
         relay.status(UpdatePhase.DOWNLOADING, "Downloading: " + relativePath, null, false);
         relay.log("         -> Downloading " + relativePath + "...");
@@ -166,41 +213,48 @@ public final class UpdateService {
 
         relay.startDownload(relativePath, UpdateEvent.DownloadKind.MANAGED_FILE, entry.getSize());
         long downloadStartedAt = System.currentTimeMillis();
-        boolean downloaded = serverClient.downloadWithFallback(
-                "/api/files/" + ServerClient.encodePath(relativePath), temporaryFile);
-
         boolean updated = false;
-        if (downloaded) {
-            String downloadedHash = fileManager.sha256(temporaryFile);
-            if (downloadedHash != null && downloadedHash.equals(entry.getSha256())) {
-                try {
-                    fileManager.replaceDownloadedFile(temporaryFile, localFile);
-                    long elapsed = System.currentTimeMillis() - downloadStartedAt;
-                    double averageSpeed = elapsed > 0
-                            ? entry.getSize() * 1000.0 / elapsed : 0;
-                    relay.log("         -> Done (" + entry.getSize() + " bytes, "
-                            + formatSpeed(averageSpeed) + ")");
-                    updated = true;
-                } catch (IOException e) {
-                    relay.log("  [FAIL]  " + relativePath + ": cannot replace file ("
-                            + e.getMessage() + ")");
-                    relay.log("  [FAIL]  " + relativePath + ": cannot move file");
-                    temporaryFile.delete();
+        try {
+            boolean downloaded = serverClient.downloadWithFallback(
+                    "/api/files/" + ServerClient.encodePath(relativePath), temporaryFile);
+            relay.checkpoint();
+
+            if (downloaded) {
+                String downloadedHash = fileManager.sha256(temporaryFile, relay::checkpoint);
+                if (downloadedHash != null && downloadedHash.equals(entry.getSha256())) {
+                    try {
+                        relay.checkpoint();
+                        fileManager.replaceDownloadedFile(temporaryFile, localFile, transaction);
+                        long elapsed = System.currentTimeMillis() - downloadStartedAt;
+                        double averageSpeed = elapsed > 0
+                                ? entry.getSize() * 1000.0 / elapsed : 0;
+                        relay.log("         -> Done (" + entry.getSize() + " bytes, "
+                                + formatSpeed(averageSpeed) + ")");
+                        updated = true;
+                    } catch (IOException e) {
+                        relay.log("  [FAIL]  " + relativePath + ": cannot replace file ("
+                                + e.getMessage() + ")");
+                    }
+                } else {
+                    relay.log("  [FAIL]  " + relativePath + ": hash mismatch after download");
                 }
             } else {
-                relay.log("  [FAIL]  " + relativePath + ": hash mismatch after download");
-                temporaryFile.delete();
+                relay.log("  [FAIL]  " + relativePath + ": download failed");
             }
-        } else {
-            relay.log("  [FAIL]  " + relativePath + ": download failed");
-            temporaryFile.delete();
+            return updated;
+        } finally {
+            try {
+                relay.finishDownload();
+            } finally {
+                if (!updated) {
+                    temporaryFile.delete();
+                }
+            }
         }
-
-        relay.finishDownload();
-        return updated;
     }
 
-    private void checkSelfUpdate(EventRelay relay, ServerClient serverClient, Manifest manifest) {
+    private void checkSelfUpdate(EventRelay relay, ServerClient serverClient, Manifest manifest,
+                                 FileTransaction transaction) throws IOException {
         if (!manifest.isAgentSectionPresent()) {
             relay.log("  [SKIP]  No agent info in manifest");
             return;
@@ -226,7 +280,7 @@ public final class UpdateService {
 
         relay.log("Checking agent update...");
         relay.log("  My path:    " + jarPath);
-        String localHash = fileManager.sha256(currentJar);
+        String localHash = fileManager.sha256(currentJar, relay::checkpoint);
         if (localHash == null) {
             relay.log("  [SKIP]  Cannot compute local agent hash");
             return;
@@ -242,28 +296,59 @@ public final class UpdateService {
         relay.status(UpdatePhase.PREPARING, "Downloading agent update...", null, false);
 
         File newJar = new File(jarPath + ".new");
-        if (newJar.exists()) {
-            newJar.delete();
+        relay.checkpoint();
+        transaction.capture(newJar);
+        if (newJar.exists() && !newJar.delete()) {
+            relay.log("  [FAIL]  Cannot replace pending agent update");
+            return;
         }
 
         relay.startDownload(currentJar.getName(), UpdateEvent.DownloadKind.UPDATER, agent.getSize());
-        boolean downloaded = serverClient.downloadWithFallback(agent.getPath(), newJar);
-        relay.finishDownload();
+        boolean keepDownloadedAgent = false;
+        try {
+            boolean downloaded = serverClient.downloadWithFallback(agent.getPath(), newJar);
+            relay.checkpoint();
 
-        if (!downloaded) {
-            relay.log("  [FAIL]  Agent download failed");
-            newJar.delete();
-            return;
+            if (!downloaded) {
+                relay.log("  [FAIL]  Agent download failed");
+                return;
+            }
+
+            String downloadedHash = fileManager.sha256(newJar, relay::checkpoint);
+            if (downloadedHash == null || !downloadedHash.equals(agent.getSha256())) {
+                relay.log("  [FAIL]  Agent hash mismatch after download");
+                return;
+            }
+
+            keepDownloadedAgent = true;
+            relay.log("  [OK]    Agent downloaded, will replace on next restart");
+        } finally {
+            try {
+                relay.finishDownload();
+            } finally {
+                if (!keepDownloadedAgent) {
+                    newJar.delete();
+                }
+            }
         }
+    }
 
-        String downloadedHash = fileManager.sha256(newJar);
-        if (downloadedHash == null || !downloadedHash.equals(agent.getSha256())) {
-            relay.log("  [FAIL]  Agent hash mismatch after download");
-            newJar.delete();
-            return;
+    private void clearActiveTransaction(FileTransaction transaction) {
+        synchronized (transactionLock) {
+            if (activeTransaction == transaction) {
+                activeTransaction = null;
+            }
         }
+    }
 
-        relay.log("  [OK]    Agent downloaded, will replace on next restart");
+    private void discardTransaction(FileTransaction transaction, Throwable original) {
+        try {
+            transaction.commit();
+        } catch (IOException cleanupError) {
+            original.addSuppressed(cleanupError);
+        } finally {
+            clearActiveTransaction(transaction);
+        }
     }
 
     private static String getMyJarPath() {
@@ -294,17 +379,25 @@ public final class UpdateService {
 
     private static final class EventRelay implements ServerClient.Listener {
         private final UpdateListener listener;
+        private final UpdateExecutionControl control;
         private String resource;
         private UpdateEvent.DownloadKind downloadKind;
         private long expectedTotalBytes;
         private long lastDownloadBytes;
         private long lastDownloadTime;
 
-        private EventRelay(UpdateListener listener) {
+        private EventRelay(UpdateListener listener, UpdateExecutionControl control) {
             this.listener = listener;
+            this.control = control;
+        }
+
+        @Override
+        public void checkpoint() {
+            control.checkpoint();
         }
 
         void emit(UpdateEvent event) {
+            checkpoint();
             listener.onUpdateEvent(event);
         }
 

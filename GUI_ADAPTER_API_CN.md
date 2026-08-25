@@ -159,21 +159,38 @@ public final class MyGuiView implements UpdateView {
     private final JFrame frame = new JFrame("Minecraft Updater");
     private final JLabel status = new JLabel();
     private final JProgressBar progress = new JProgressBar();
+    private UpdateUiState currentState = UpdateUiState.initial();
 
     public MyGuiView(UpdateViewActions actions, String gameDir, boolean debug) {
         this.actions = actions;
         // ... 组装窗口 ...
         progress.setStringPainted(true);
+        frame.setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
 
         // 把用户意图上报给 controller：
         frame.addWindowListener(new java.awt.event.WindowAdapter() {
             @Override public void windowClosing(java.awt.event.WindowEvent e) {
-                actions.requestClose();            // 用户请求关闭
+                requestWindowClose();
             }
             @Override public void windowClosed(java.awt.event.WindowEvent e) {
                 actions.notifyWindowClosed();      // 原生窗口已关闭
             }
         });
+    }
+
+    private void requestWindowClose() {
+        if (currentState.getClosePolicy() == ClosePolicy.CONFIRM) {
+            actions.beginCloseConfirmation();
+            int choice = JOptionPane.showConfirmDialog(frame,
+                    "停止本次更新、还原已修改文件并启动 Minecraft？",
+                    "更新进行中", JOptionPane.YES_NO_OPTION,
+                    JOptionPane.WARNING_MESSAGE);
+            if (choice != JOptionPane.YES_OPTION) {
+                actions.cancelCloseConfirmation();
+                return;
+            }
+        }
+        actions.requestClose();
     }
 
     @Override
@@ -183,6 +200,7 @@ public final class MyGuiView implements UpdateView {
 
     @Override
     public void render(UpdateUiState state) {
+        currentState = state;
         // `state` 是完整快照，需要整体替换渲染。
         status.setText(state.getStatus());
         if (state.isOverallProgressIndeterminate()) {
@@ -215,18 +233,24 @@ public final class MyGuiView implements UpdateView {
 
 | 方法 | 何时调用 |
 |------|----------|
-| `requestClose()` | 用户请求关闭（点了 ✕ 或「取消」按钮）。 |
+| `beginCloseConfirmation()` | 即将显示 `CONFIRM` 确认框前立即调用；工作线程会在下一个安全检查点暂停。 |
+| `cancelCloseConfirmation()` | 用户拒绝或关闭确认框时调用；工作线程恢复。 |
+| `requestClose()` | 用户确认关闭后调用；`ALLOW` 策略时可直接调用。 |
 | `notifyWindowClosed()` | 原生窗口真正关闭完成。 |
 
 controller 根据当前状态中的**关闭策略**决定结果：
 
 | `ClosePolicy` | 何时 | 关闭会发生什么 |
 |---------------|------|----------------|
-| `CONFIRM` | 更新进行中 | 视图应先用工具自带对话框确认。确认后 `requestClose()` 会释放启动锁（Minecraft 继续）并关闭视图。 |
+| `CONFIRM` | 更新进行中 | 将原生关闭操作设为「不执行任何操作」，并在显示工具包确认警告前立刻调用 `beginCloseConfirmation()`；若用户拒绝则调用 `cancelCloseConfirmation()`。若确认则调用 `requestClose()`：更新器取消任务、还原本次更新改动过的全部文件，再启动 Minecraft 并关闭视图。 |
 | `ALLOW` | 更新成功 | 允许关闭；启动锁被释放，窗口关闭。 |
 | `EXIT_FAILURE` | 更新失败 | 任何关闭（请求或原生）都会调用 `System.exit(1)`——**Minecraft 不会启动**。 |
 
 > 切勿自行释放启动锁或调用 `System.exit`，两者都由 controller 掌控。
+
+`beginCloseConfirmation()` 和 `cancelCloseConfirmation()` 是默认方法，因此已有
+adapter 在源码和二进制层面均可继续兼容。要让确认框显示期间暂停后台工作，adapter
+需要按上述顺序接入这两个方法。
 
 ---
 
@@ -345,8 +369,10 @@ void close();                  // controller 决定关闭窗口
 ### 4.5 `UpdateViewActions`（接口）
 
 ```java
-void requestClose();       // 用户请求关闭窗口
-void notifyWindowClosed(); // 原生窗口关闭完成
+void beginCloseConfirmation();  // 显示 CONFIRM 确认框前暂停
+void cancelCloseConfirmation(); // 确认被拒绝后恢复
+void requestClose();            // 用户已确认关闭
+void notifyWindowClosed();      // 原生窗口关闭完成
 ```
 
 由 controller 实现——见[第 5 步](#第-5-步--正确处理关闭)。
