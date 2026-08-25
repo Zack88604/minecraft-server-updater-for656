@@ -17,6 +17,9 @@ package com.zack88604.autoupdater.bootstrap;
  *   cd build && jar cfm ../UpdateAgent.jar ../META-INF/MANIFEST.MF *.class
  */
 
+import com.zack88604.autoupdater.config.AgentConfig;
+import com.zack88604.autoupdater.domain.FileEntry;
+import com.zack88604.autoupdater.domain.UpdateResult;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
@@ -33,10 +36,7 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.regex.Matcher;
@@ -44,121 +44,32 @@ import java.util.regex.Pattern;
 
 public final class AgentBootstrap {
 
-    private static final String PROP_SERVER  = "mc-update.server";
-    private static final String PROP_GAME_DIR = "mc-update.game-dir";
-    private static final String PROP_DEBUG    = "mc-update.debug";
-    private static final String CONFIG_FILE   = "mc-update.properties";
-    private static final String DEFAULT_SERVER = "http://localhost:25565";
+    private static final String PROP_SERVER = AgentConfig.PROP_SERVER;
+    private static final String PROP_GAME_DIR = AgentConfig.PROP_GAME_DIR;
+    private static final String PROP_DEBUG = AgentConfig.PROP_DEBUG;
 
     // ── Agent entry point ────────────────────────────────────────
 
     public static void premain(String args, Instrumentation inst) {
-        // 1. Parse agent args into a map (don't set system properties yet)
-        Map<String, String> agentArgs = parseAgentArgs(args);
-        boolean admin = "true".equalsIgnoreCase(agentArgs.get("admin"));
+        AgentConfig config = AgentConfig.resolve(args);
 
-        // 2. Resolve game directory: agent arg > -D system property > user.dir
-        String gameDir = coalesce(
-            agentArgs.get("game-dir"),
-            System.getProperty(PROP_GAME_DIR),
-            System.getProperty("user.dir", ".")
-        );
-        System.setProperty(PROP_GAME_DIR, gameDir);
-
-        // 3. Load persistent config from game directory
-        Properties fileConfig = loadConfigFile(new File(gameDir));
-
-        // 4. Merge config with mode-dependent priority
-        //    Normal:  file config > agent args > -D system props > defaults
-        //    Admin:   agent args  > -D system props > file config  > defaults (original)
-        String server;
-        boolean debug;
-
-        if (admin) {
-            server = coalesce(
-                agentArgs.get("server"),
-                System.getProperty(PROP_SERVER),
-                fileConfig.getProperty("server"),
-                DEFAULT_SERVER
-            );
-            String debugStr = coalesce(
-                agentArgs.get("debug"),
-                System.getProperty(PROP_DEBUG),
-                fileConfig.getProperty("debug"),
-                "false"
-            );
-            debug = "true".equalsIgnoreCase(debugStr) || "1".equals(debugStr);
-        } else {
-            server = coalesce(
-                fileConfig.getProperty("server"),
-                agentArgs.get("server"),
-                System.getProperty(PROP_SERVER),
-                DEFAULT_SERVER
-            );
-            String debugStr = coalesce(
-                fileConfig.getProperty("debug"),
-                agentArgs.get("debug"),
-                System.getProperty(PROP_DEBUG),
-                "false"
-            );
-            debug = "true".equalsIgnoreCase(debugStr) || "1".equals(debugStr);
-        }
-
-        System.setProperty(PROP_SERVER, server);
-        if (debug) {
+        // Keep these legacy properties populated until the remaining Swing
+        // updater code is moved out of this bootstrap.
+        System.setProperty(PROP_GAME_DIR, config.getGameDir());
+        System.setProperty(PROP_SERVER, config.getServer());
+        if (config.isDebug()) {
             System.setProperty(PROP_DEBUG, "true");
         }
 
-        // Block premain until update check finishes, then allow Minecraft to start
+        // Block premain until update check finishes, then allow Minecraft to start.
         CountDownLatch latch = new CountDownLatch(1);
-        final boolean finalDebug = debug;
-        SwingUtilities.invokeLater(() -> new UpdateGUI(latch, finalDebug));
+        SwingUtilities.invokeLater(() -> new UpdateGUI(latch, config.isDebug()));
 
         try {
-            latch.await();  // block until update check completes
+            latch.await();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-    }
-
-    // ── Agent args parser ─────────────────────────────────────
-
-    /** Parse comma-separated key=value pairs from -javaagent args. Never returns null. */
-    private static Map<String, String> parseAgentArgs(String args) {
-        Map<String, String> map = new LinkedHashMap<>();
-        if (args != null && !args.isEmpty()) {
-            for (String token : args.split(",")) {
-                String[] kv = token.split("=", 2);
-                if (kv.length == 2) {
-                    map.put(kv[0].trim(), kv[1].trim());
-                }
-            }
-        }
-        return map;
-    }
-
-    // ── Value coalescing ──────────────────────────────────────
-
-    /** Return the first non-null, non-empty value from the given candidates. */
-    private static String coalesce(String... values) {
-        for (String v : values) {
-            if (v != null && !v.isEmpty()) return v;
-        }
-        return null;
-    }
-
-    // ── Persistent config file ─────────────────────────────────
-
-    /** Load mc-update.properties from the given directory. Never returns null. */
-    static Properties loadConfigFile(File dir) {
-        Properties props = new Properties();
-        File configFile = new File(dir, CONFIG_FILE);
-        if (configFile.isFile()) {
-            try (FileInputStream fis = new FileInputStream(configFile)) {
-                props.load(fis);
-            } catch (IOException ignored) {}
-        }
-        return props;
     }
 
     // ── Utility: get own JAR path ──────────────────────────────
@@ -250,16 +161,7 @@ public final class AgentBootstrap {
             }
         }
 
-        /** Final result returned by the background update operation. */
-        private static final class UpdateResult {
-            final int updated;
-            final int failed;
 
-            UpdateResult(int updated, int failed) {
-                this.updated = updated;
-                this.failed = failed;
-            }
-        }
 
         UpdateGUI(CountDownLatch latch, boolean debug) {
             this.latch = latch;
@@ -277,16 +179,9 @@ public final class AgentBootstrap {
                 gameDir = System.getProperty("user.dir", ".");
             }
 
-            // serverUrls: parse comma-separated list from system property or config file
-            String serverProp = System.getProperty(PROP_SERVER);
-            if (serverProp == null || serverProp.isEmpty()) {
-                Properties fc = loadConfigFile(new File(gameDir));
-                serverProp = fc.getProperty("server");
-            }
-            if (serverProp == null || serverProp.isEmpty()) {
-                serverProp = DEFAULT_SERVER;
-            }
-            serverUrls = parseServerList(serverProp);
+            // The bootstrap has already resolved configuration and populated this property.
+            serverUrls = parseServerList(
+                    System.getProperty(PROP_SERVER, AgentConfig.DEFAULT_SERVER));
         }
 
         /** Parse comma-separated server URLs, trimming whitespace from each. */
@@ -570,7 +465,7 @@ public final class AgentBootstrap {
 
             for (FileEntry entry : manifestFiles) {
                 checked++;
-                String relPath = entry.path;
+                String relPath = entry.getPath();
 
                 File localFile = resolveManagedFile(relPath);
                 if (localFile == null) {
@@ -590,7 +485,7 @@ public final class AgentBootstrap {
                     if (localHash == null) {
                         log("  [WARN]  " + relPath + " (cannot read, re-downloading)");
                         needDownload = true;
-                    } else if (!localHash.equals(entry.hash)) {
+                    } else if (!localHash.equals(entry.getSha256())) {
                         log("  [DIFF]  " + relPath + " (hash mismatch)");
                         needDownload = true;
                     } else {
@@ -606,7 +501,7 @@ public final class AgentBootstrap {
                     File tmpFile = new File(localFile.getPath() + ".tmp");
 
                     // Track per-file download progress
-                    dlTotalBytes = entry.size;
+                    dlTotalBytes = entry.getSize();
                     dlDownloadedBytes = 0;
                     dlActive = true;
                     dlLastBytes = 0;
@@ -620,11 +515,11 @@ public final class AgentBootstrap {
 
                     if (ok) {
                         String dlHash = sha256(tmpFile);
-                        if (dlHash != null && dlHash.equals(entry.hash)) {
+                        if (dlHash != null && dlHash.equals(entry.getSha256())) {
                             if (replaceDownloadedFile(tmpFile, localFile, relPath)) {
                                 long dlElapsed = System.currentTimeMillis() - dlStart;
-                                double avgSpeed = dlElapsed > 0 ? entry.size * 1000.0 / dlElapsed : 0;
-                                log("         -> Done (" + entry.size + " bytes, " + formatSpeed(avgSpeed) + ")");
+                                double avgSpeed = dlElapsed > 0 ? entry.getSize() * 1000.0 / dlElapsed : 0;
+                                log("         -> Done (" + entry.getSize() + " bytes, " + formatSpeed(avgSpeed) + ")");
                                 updated++;
                             } else {
                                 log("  [FAIL]  " + relPath + ": cannot move file");
@@ -679,12 +574,12 @@ public final class AgentBootstrap {
                 try {
                     UpdateResult result = get();
                     setOverallProgress(100);
-                    if (result.failed > 0) {
-                        setStatus("Update finished with " + result.failed + " error(s)", false);
-                        log("[FATAL] " + result.failed + " file(s) failed to update, killing Minecraft process...");
+                    if (result.getFailedFiles() > 0) {
+                        setStatus("Update finished with " + result.getFailedFiles() + " error(s)", false);
+                        log("[FATAL] " + result.getFailedFiles() + " file(s) failed to update, killing Minecraft process...");
                         new javax.swing.Timer(2000, ev -> System.exit(1)).start();
-                    } else if (result.updated > 0) {
-                        setStatus("Updated " + result.updated + " file(s), launching Minecraft...", false);
+                    } else if (result.getUpdatedFiles() > 0) {
+                        setStatus("Updated " + result.getUpdatedFiles() + " file(s), launching Minecraft...", false);
                         autoClose(2000);
                     } else {
                         setStatus("Already up to date, launching Minecraft...", false);
@@ -953,7 +848,7 @@ public final class AgentBootstrap {
         private void cleanStaleFiles(List<FileEntry> manifestFiles, List<String> managedPaths,
                                       List<String> excludedPaths) {
             Set<String> manifestSet = new HashSet<>();
-            for (FileEntry e : manifestFiles) manifestSet.add(e.path);
+            for (FileEntry e : manifestFiles) manifestSet.add(e.getPath());
             for (String mp : managedPaths) {
                 if (mp.equals("*")) continue;
                 String pathToResolve = mp.endsWith("/")
@@ -1053,15 +948,6 @@ public final class AgentBootstrap {
             });
         }
 
-        // ── Data class ────────────────────────────────────────────
-
-        static class FileEntry {
-            final String path, hash;
-            final int size;
-            FileEntry(String path, String hash, int size) {
-                this.path = path; this.hash = hash; this.size = size;
-            }
-        }
 
         // ── Self-update ─────────────────────────────────────────
 
