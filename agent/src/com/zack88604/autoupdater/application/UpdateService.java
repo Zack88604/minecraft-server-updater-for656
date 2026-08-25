@@ -4,6 +4,7 @@ import com.zack88604.autoupdater.domain.AgentArtifact;
 import com.zack88604.autoupdater.domain.FileEntry;
 import com.zack88604.autoupdater.domain.Manifest;
 import com.zack88604.autoupdater.domain.UpdateResult;
+import com.zack88604.autoupdater.gui.api.UpdatePhase;
 import com.zack88604.autoupdater.infrastructure.files.FileManager;
 import com.zack88604.autoupdater.infrastructure.http.ServerClient;
 import com.zack88604.autoupdater.infrastructure.json.ManifestParser;
@@ -66,7 +67,7 @@ public final class UpdateService {
         }
         relay.log("Game dir: " + gameDirectory);
 
-        relay.status("Checking for updates...", true);
+        relay.status(UpdatePhase.PREPARING, "Checking for updates...", null, true);
         relay.log("Fetching manifest...");
         String manifestJson = serverClient.getWithFallback("/api/v2/manifest");
         Manifest manifest = ManifestParser.parse(manifestJson);
@@ -103,7 +104,8 @@ public final class UpdateService {
             if (localFile == null) {
                 relay.log("  [REJECT] " + relativePath + " (unsafe manifest path)");
                 failed++;
-                relay.status("Rejected unsafe path: " + checked + "/" + total, false);
+                relay.status(UpdatePhase.CHECKING,
+                        "Rejected unsafe path: " + checked + "/" + total, null, false);
                 relay.overallProgress(total > 0 ? checked * 95 / total : 100);
                 continue;
             }
@@ -117,11 +119,14 @@ public final class UpdateService {
                 }
             }
 
-            relay.status("Checked: " + checked + "/" + total, false);
+            relay.status(UpdatePhase.CHECKING,
+                    "Checked: " + checked + "/" + total, null, false);
             relay.overallProgress(total > 0 ? checked * 95 / total : 100);
         }
 
         relay.log("Cleaning stale files...");
+        relay.status(UpdatePhase.CLEANING, "Cleaning up…",
+                "Removing files that are no longer needed", true);
         fileManager.cleanStaleFiles(manifestFiles, manifest.getManagedPaths(),
                 manifest.getExcludedPaths(), relay::log);
 
@@ -151,7 +156,7 @@ public final class UpdateService {
     private boolean updateFile(EventRelay relay, ServerClient serverClient,
                                File localFile, FileEntry entry) {
         String relativePath = entry.getPath();
-        relay.status("Downloading: " + relativePath, false);
+        relay.status(UpdatePhase.DOWNLOADING, "Downloading: " + relativePath, null, false);
         relay.log("         -> Downloading " + relativePath + "...");
         File parent = localFile.getParentFile();
         if (parent != null && !parent.isDirectory()) {
@@ -234,7 +239,7 @@ public final class UpdateService {
         relay.log("  [UPDATE] New agent version available!");
         relay.log("  Remote: " + agent.getSha256());
         relay.log("  Local:  " + localHash);
-        relay.status("Downloading agent update...", false);
+        relay.status(UpdatePhase.PREPARING, "Downloading agent update...", null, false);
 
         File newJar = new File(jarPath + ".new");
         if (newJar.exists()) {
@@ -292,6 +297,8 @@ public final class UpdateService {
         private String resource;
         private UpdateEvent.DownloadKind downloadKind;
         private long expectedTotalBytes;
+        private long lastDownloadBytes;
+        private long lastDownloadTime;
 
         private EventRelay(UpdateListener listener) {
             this.listener = listener;
@@ -305,8 +312,9 @@ public final class UpdateService {
             emit(new UpdateEvent.LogMessage(message));
         }
 
-        void status(String status, boolean indeterminate) {
-            emit(new UpdateEvent.StatusChanged(status, indeterminate));
+        void status(UpdatePhase phase, String status, String description,
+                    boolean indeterminate) {
+            emit(new UpdateEvent.StatusChanged(phase, status, description, indeterminate));
         }
 
         void overallProgress(int percentage) {
@@ -317,8 +325,10 @@ public final class UpdateService {
             this.resource = resource;
             this.downloadKind = kind;
             this.expectedTotalBytes = expectedTotalBytes;
+            this.lastDownloadBytes = 0;
+            this.lastDownloadTime = System.currentTimeMillis();
             emit(UpdateEvent.DownloadProgressChanged.active(
-                    resource, kind, expectedTotalBytes, 0));
+                    resource, kind, expectedTotalBytes, 0, 0));
         }
 
         void finishDownload() {
@@ -326,6 +336,8 @@ public final class UpdateService {
             resource = null;
             downloadKind = null;
             expectedTotalBytes = 0;
+            lastDownloadBytes = 0;
+            lastDownloadTime = 0;
         }
 
         @Override
@@ -341,8 +353,15 @@ public final class UpdateService {
         @Override
         public void onDownloadProgress(long totalBytes, long downloadedBytes) {
             long effectiveTotal = totalBytes > 0 ? totalBytes : expectedTotalBytes;
+            long now = System.currentTimeMillis();
+            long elapsed = now - lastDownloadTime;
+            long bytesDelta = downloadedBytes - lastDownloadBytes;
+            double bytesPerSecond = elapsed > 0
+                    ? Math.max(0, bytesDelta) * 1000.0 / elapsed : 0;
+            lastDownloadBytes = downloadedBytes;
+            lastDownloadTime = now;
             emit(UpdateEvent.DownloadProgressChanged.active(
-                    resource, downloadKind, effectiveTotal, downloadedBytes));
+                    resource, downloadKind, effectiveTotal, downloadedBytes, bytesPerSecond));
         }
     }
 }

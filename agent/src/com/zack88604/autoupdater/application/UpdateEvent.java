@@ -1,5 +1,7 @@
 package com.zack88604.autoupdater.application;
 
+import com.zack88604.autoupdater.gui.api.UpdatePhase;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -19,16 +21,30 @@ public abstract class UpdateEvent {
 
     /** A textual status and its progress-bar mode changed. */
     public static final class StatusChanged extends UpdateEvent {
+        private final UpdatePhase phase;
         private final String status;
+        private final String description;
         private final boolean indeterminate;
 
-        public StatusChanged(String status, boolean indeterminate) {
+        public StatusChanged(UpdatePhase phase, String status, String description,
+                             boolean indeterminate) {
+            this.phase = Objects.requireNonNull(phase, "phase");
             this.status = Objects.requireNonNull(status, "status");
+            this.description = description;
             this.indeterminate = indeterminate;
+        }
+
+        public UpdatePhase getPhase() {
+            return phase;
         }
 
         public String getStatus() {
             return status;
+        }
+
+        /** Return an optional secondary status description. */
+        public String getDescription() {
+            return description;
         }
 
         public boolean isIndeterminate() {
@@ -98,28 +114,34 @@ public abstract class UpdateEvent {
         private final boolean active;
         private final long totalBytes;
         private final long downloadedBytes;
+        private final double bytesPerSecond;
 
         private DownloadProgressChanged(String resource, DownloadKind kind, boolean active,
-                                        long totalBytes, long downloadedBytes) {
+                                        long totalBytes, long downloadedBytes,
+                                        double bytesPerSecond) {
             this.resource = resource;
             this.kind = kind;
             this.active = active;
             this.totalBytes = totalBytes;
             this.downloadedBytes = downloadedBytes;
+            this.bytesPerSecond = bytesPerSecond;
         }
 
         public static DownloadProgressChanged active(String resource, DownloadKind kind,
-                                                     long totalBytes, long downloadedBytes) {
+                                                     long totalBytes, long downloadedBytes,
+                                                     double bytesPerSecond) {
             Objects.requireNonNull(resource, "resource");
             Objects.requireNonNull(kind, "kind");
-            if (totalBytes < 0 || downloadedBytes < 0) {
-                throw new IllegalArgumentException("download byte counts must be >= 0");
+            if (totalBytes < 0 || downloadedBytes < 0 || bytesPerSecond < 0) {
+                throw new IllegalArgumentException(
+                        "download byte counts and speed must be >= 0");
             }
-            return new DownloadProgressChanged(resource, kind, true, totalBytes, downloadedBytes);
+            return new DownloadProgressChanged(resource, kind, true, totalBytes,
+                    downloadedBytes, bytesPerSecond);
         }
 
         public static DownloadProgressChanged inactive() {
-            return new DownloadProgressChanged(null, null, false, 0, 0);
+            return new DownloadProgressChanged(null, null, false, 0, 0, 0);
         }
 
         public String getResource() {
@@ -140,6 +162,42 @@ public abstract class UpdateEvent {
 
         public long getDownloadedBytes() {
             return downloadedBytes;
+        }
+
+        public double getBytesPerSecond() {
+            return bytesPerSecond;
+        }
+    }
+
+    /** The update use case completed normally. */
+    public static final class Completed extends UpdateEvent {
+        private final com.zack88604.autoupdater.domain.UpdateResult result;
+
+        public Completed(com.zack88604.autoupdater.domain.UpdateResult result) {
+            this.result = Objects.requireNonNull(result, "result");
+        }
+
+        public com.zack88604.autoupdater.domain.UpdateResult getResult() {
+            return result;
+        }
+    }
+
+    /** The update use case stopped because an exception escaped the flow. */
+    public static final class Failed extends UpdateEvent {
+        private final String message;
+        private final Throwable cause;
+
+        public Failed(String message, Throwable cause) {
+            this.message = Objects.requireNonNull(message, "message");
+            this.cause = Objects.requireNonNull(cause, "cause");
+        }
+
+        public String getMessage() {
+            return message;
+        }
+
+        public Throwable getCause() {
+            return cause;
         }
     }
 }
