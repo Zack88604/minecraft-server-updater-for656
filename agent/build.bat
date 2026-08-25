@@ -13,8 +13,10 @@ set "LAUNCHER_JAR=%SCRIPT_DIR%UpdateAgent.jar"
 set "CORE_JAR=%SCRIPT_DIR%UpdateAgent_core.jar"
 
 echo [build] Compiling...
-if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
-javac -d "%BUILD_DIR%" "%SRC_DIR%\Launcher.java" "%SRC_DIR%\UpdateAgent.java"
+if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
+mkdir "%BUILD_DIR%"
+dir /s /b "%SRC_DIR%\*.java" > "%BUILD_DIR%\sources.txt"
+javac -d "%BUILD_DIR%" @"%BUILD_DIR%\sources.txt"
 if %ERRORLEVEL% neq 0 (
     echo [build] Compilation failed!
     exit /b 1
@@ -22,6 +24,7 @@ if %ERRORLEVEL% neq 0 (
 
 echo [build] Packaging launcher JAR...
 cd /d "%BUILD_DIR%"
+del /q "sources.txt" 2>nul
 jar cfm "%LAUNCHER_JAR%" "%SCRIPT_DIR%META-INF\MANIFEST.MF" Launcher.class
 if %ERRORLEVEL% neq 0 (
     echo [build] Launcher JAR packaging failed!
@@ -29,15 +32,13 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo [build] Packaging core JAR...
-REM Temporarily exclude Launcher classes from core JAR
-if exist Launcher.class ren Launcher.class Launcher.class.exclude
-jar cf "%CORE_JAR%" *.class
+REM Keep the launcher out of the self-updatable core, but include the default
+REM package UpdateAgent compatibility facade and all named-package classes.
+jar cf "%CORE_JAR%" UpdateAgent.class com
 if %ERRORLEVEL% neq 0 (
     echo [build] Core JAR packaging failed!
     exit /b 1
 )
-REM Restore Launcher classes
-if exist Launcher.class.exclude ren Launcher.class.exclude Launcher.class
 
 echo [build] Done!
 echo [build] Launcher: %LAUNCHER_JAR%

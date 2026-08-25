@@ -13,19 +13,18 @@ LAUNCHER_JAR="$SCRIPT_DIR/UpdateAgent.jar"
 CORE_JAR="$SCRIPT_DIR/UpdateAgent_core.jar"
 
 echo "[build] Compiling..."
+rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
-javac -d "$BUILD_DIR" "$SRC_DIR/Launcher.java" "$SRC_DIR/UpdateAgent.java"
+find "$SRC_DIR" -type f -name '*.java' -print0 | xargs -0 javac -d "$BUILD_DIR"
 
 echo "[build] Packaging launcher JAR..."
 cd "$BUILD_DIR"
 jar cfm "$LAUNCHER_JAR" "$SCRIPT_DIR/META-INF/MANIFEST.MF" Launcher.class
 
 echo "[build] Packaging core JAR..."
-# Temporarily exclude Launcher class from core JAR
-if [ -f Launcher.class ]; then mv Launcher.class Launcher.class.exclude; fi
-jar cf "$CORE_JAR" *.class
-# Restore Launcher class
-if [ -f Launcher.class.exclude ]; then mv Launcher.class.exclude Launcher.class; fi
+# Keep the launcher out of the self-updatable core, but include the default
+# package UpdateAgent compatibility facade and all named-package classes.
+jar cf "$CORE_JAR" UpdateAgent.class com
 
 echo "[build] Done!"
 echo "[build] Launcher: $LAUNCHER_JAR"
