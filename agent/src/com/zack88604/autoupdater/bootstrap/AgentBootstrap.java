@@ -6,8 +6,14 @@ import com.zack88604.autoupdater.config.AgentConfig;
 import com.zack88604.autoupdater.gui.api.GuiAdapter;
 import com.zack88604.autoupdater.gui.api.GuiAdapterContext;
 import com.zack88604.autoupdater.gui.api.GuiAdapterFactory;
+import com.zack88604.autoupdater.gui.preset.ExternalGuiAdapterFactoryLoader;
+import com.zack88604.autoupdater.gui.preset.GuiPreset;
+import com.zack88604.autoupdater.gui.preset.GuiPresetSelection;
+import com.zack88604.autoupdater.gui.preset.GuiPresetStore;
 import com.zack88604.autoupdater.gui.swing.SwingGuiAdapterFactory;
+import com.zack88604.autoupdater.gui.swing.SwingGuiPresetChooser;
 
+import java.io.IOException;
 import java.lang.instrument.Instrumentation;
 import java.util.ArrayList;
 import java.util.List;
@@ -61,24 +67,86 @@ public final class AgentBootstrap {
     }
 
     private static GuiAdapter createGuiAdapter(AgentConfig config) {
-        GuiAdapterContext context = new GuiAdapterContext(
-                config.getGameDir(), config.isDebug());
+        GuiPresetStore presetStore = new GuiPresetStore(config.getGameDir());
+        GuiAdapterContext context = new GuiAdapterContext(config.getGameDir(),
+                presetStore.getConfigurationDirectory().getAbsolutePath(), config.isDebug());
+
+        // Preserve the established explicit factory setting for adapters already
+        // compiled into the updater core.
         String factoryClassName = config.getGuiAdapterFactoryClassName();
-        GuiAdapterFactory factory = new SwingGuiAdapterFactory();
         if (factoryClassName != null) {
-            try {
-                Class<?> candidate = Class.forName(factoryClassName, true,
-                        AgentBootstrap.class.getClassLoader());
-                Class<? extends GuiAdapterFactory> factoryType =
-                        candidate.asSubclass(GuiAdapterFactory.class);
-                factory = factoryType.getDeclaredConstructor().newInstance();
-            } catch (ReflectiveOperationException | ClassCastException e) {
-                throw new IllegalStateException("Unable to create GUI adapter factory: "
-                        + factoryClassName, e);
-            }
+            return createConfiguredAdapter(factoryClassName, context);
         }
-        return Objects.requireNonNull(factory.create(context),
-                "GuiAdapterFactory returned null adapter");
+
+        try {
+            List<GuiPreset> presets = presetStore.findLoadablePresets();
+            GuiPresetSelection selection = presetStore.readDefault(presets);
+            if (selection == null) {
+                selection = SwingGuiPresetChooser.choose(presets);
+            } else if (!selection.isSwing()
+                    && !SwingGuiPresetChooser.confirmExternalPreset(selection.getPreset())) {
+                selection = GuiPresetSelection.swing(false);
+            }
+
+            if (selection.isSwing()) {
+                persistSelection(presetStore, selection);
+                return createBuiltInAdapter(context);
+            }
+
+            GuiPreset preset = selection.getPreset();
+            try {
+                GuiAdapterFactory factory = new ExternalGuiAdapterFactoryLoader().load(preset);
+                GuiAdapter adapter = Objects.requireNonNull(factory.create(context),
+                        "GuiAdapterFactory returned null adapter");
+                persistSelection(presetStore, selection);
+                return adapter;
+            } catch (RuntimeException | LinkageError error) {
+                clearSelection(presetStore);
+                SwingGuiPresetChooser.showLoadFailure(preset);
+                return createBuiltInAdapter(context);
+            }
+        } catch (IOException error) {
+            System.err.println("Unable to read GUI preset settings: " + error.getMessage());
+            SwingGuiPresetChooser.showStorageFailure();
+            return createBuiltInAdapter(context);
+        }
+    }
+
+    private static GuiAdapter createConfiguredAdapter(String factoryClassName,
+                                                       GuiAdapterContext context) {
+        try {
+            Class<?> candidate = Class.forName(factoryClassName, true,
+                    AgentBootstrap.class.getClassLoader());
+            Class<? extends GuiAdapterFactory> factoryType =
+                    candidate.asSubclass(GuiAdapterFactory.class);
+            GuiAdapterFactory factory = factoryType.getDeclaredConstructor().newInstance();
+            return Objects.requireNonNull(factory.create(context),
+                    "GuiAdapterFactory returned null adapter");
+        } catch (ReflectiveOperationException | ClassCastException error) {
+            throw new IllegalStateException("Unable to create GUI adapter factory: "
+                    + factoryClassName, error);
+        }
+    }
+
+    private static GuiAdapter createBuiltInAdapter(GuiAdapterContext context) {
+        return new SwingGuiAdapterFactory().create(context);
+    }
+
+    private static void persistSelection(GuiPresetStore presetStore,
+                                         GuiPresetSelection selection) {
+        try {
+            presetStore.saveDefault(selection);
+        } catch (IOException error) {
+            System.err.println("Unable to save GUI preset selection: " + error.getMessage());
+        }
+    }
+
+    private static void clearSelection(GuiPresetStore presetStore) {
+        try {
+            presetStore.clearDefault();
+        } catch (IOException error) {
+            System.err.println("Unable to clear GUI preset selection: " + error.getMessage());
+        }
     }
 
     /** Parse comma-separated server URLs with the legacy normalization rules. */

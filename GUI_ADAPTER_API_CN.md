@@ -36,6 +36,47 @@ gui-adapter=com.example.updategui.MyGuiAdapterFactory
 
 未配置工厂时，仍会使用内建的 Swing adapter。
 
+## 外部 GUI 预设
+
+未显式配置 gui-adapter 时，更新器会使用游戏根目录下的固定位置：
+
+~~~text
+.mc-update/
+  gui-selection.properties    # 由更新器管理
+  gui-presets/
+    my-gui.jar
+~~~
+
+根目录的 mc-update.properties 保持原位置，不会被移动。首次启动且尚未保存选择时，
+更新器会扫描 gui-presets 目录；发现可选择的 JAR 后，会由受信任的 Swing 窗口让用户
+选择外部预设或内建 Swing GUI。窗口中的复选框决定是否把本次选择保存为后续启动的默认
+GUI。
+
+已保存的 Swing 默认选择会直接启动。已保存的外部预设在每次加载 JAR 前都仍会显示风险
+确认；拒绝确认、加载失败或预设元数据消失时，更新器会回退到 Swing。删除
+gui-selection.properties 即可再次显示选择窗口。
+
+### 预设 JAR 契约
+
+可选择的 JAR 必须包含以下元数据文件：
+
+~~~properties
+# META-INF/mc-update-gui.properties
+name=Example GUI
+version=1.0.0
+factory-class=com.example.updategui.MyGuiAdapterFactory
+~~~
+
+工厂类必须为 public、具有 public 无参构造函数，并实现 GuiAdapterFactory。请以
+UpdateAgent_core.jar 作为 provided 依赖编译，不要把更新器 API 或 core 类再次打包进
+预设 JAR。
+
+扫描时只读取元数据，不会加载预设类；只有用户确认风险后才会加载工厂类。外部 JAR 会在
+游戏进程中执行代码，可能读取或修改文件、访问网络、影响游戏进程；只能安装来自可信来源
+的文件。
+
+GuiAdapterContext 提供游戏根目录以及固定的更新器配置目录，供展示资源使用。
+
 ## Adapter 规则
 
 - 实现 `GuiAdapter`、`UiDispatcher` 与 `UpdateView`；`GuiAdapterContext` 仅用于
