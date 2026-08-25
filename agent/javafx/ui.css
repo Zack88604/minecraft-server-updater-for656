@@ -1,0 +1,389 @@
+/* =====================================================================
+ * Minecraft Update Check — JavaFX View (ui.css)
+ *
+ * One visual system for both the normal and the debug window, and for the
+ * "Quit update?" confirmation dialog. Values mirror UI视觉系统设计.md §3;
+ * JavaFX CSS does not support custom properties, so the Design Tokens are
+ * frozen here as comments and referenced literally below.
+ *
+ *   Colors
+ *     --color-window          #0F1417   window root background
+ *     --color-surface         #161C21   panels / details / log
+ *     --color-surface-raised  #1E262C   hover surfaces, button base
+ *     --color-text-primary    #E6E8EB   status-title, body
+ *     --color-text-secondary  #A8B0BA   status-description, file labels
+ *     --color-text-muted      #6B7681   pct, speed, details label
+ *     --color-accent          #5DD35D   focus, progress fill, primary action
+ *     --color-success         #3FAE57   SUCCESS state title
+ *     --color-error           #E05252   ERROR state title, danger-button
+ *     --color-error-soft      #C56F6F   ERROR state description (round-2)
+ *     --color-border          #2A3238   borders
+ *     --color-border-strong   #3A454D   hover / focus borders
+ *     --color-progress-track  #232B31   progress bar track
+ *
+ *   Typography
+ *     --font-title        20px / 600   (step-5: 16 -> 20 SemiBold)
+ *     --font-subtitle     13px / 400   (step-5: 14 -> 13)
+ *     --font-body         13px / 400
+ *     --font-details      12px / 400
+ *     --font-monospace    12px         Consolas / Menlo / monospace
+ *
+ *   Spacing  --space-4 4 / --space-8 8 / --space-12 12
+ *   Radius   --radius-sm 4 / --radius-md 6 / --radius-lg 10
+ *   Bars     --height-overall-bar 8px / --height-file-bar 6px
+ *
+ * Deliberately absent: CSS-drawn icons, animations, gradients, background
+ * images and Minecraft textures. The status-illustration slot in the view is a
+ * reserved StackPane (two stacked ImageViews) that cross-fades preloaded
+ * transparent PNGs from the JAR per phase; the micro-animations live in Java,
+ * never here. Any missing image degrades to a hidden slot.
+ * ===================================================================== */
+
+.root {
+    -fx-background-color: #0F1417;
+    -fx-font-family: "System";
+    -fx-font-size: 13px;
+    -fx-text-fill: #E6E8EB;
+    /* Replace the default blue focus glow with a subtle accent so every
+       control (buttons, text area, details) stays flat. */
+    -fx-focus-color: #5DD35D;
+    -fx-faint-focus-color: #5DD35D33;
+}
+
+/* ── Status ─────────────────────────────────────────────────────── */
+
+.status-title {
+    -fx-font-size: 20px;
+    -fx-font-weight: 600;
+    -fx-text-fill: #E6E8EB;
+}
+
+.status-description {
+    -fx-font-size: 13px;
+    -fx-text-fill: #A8B0BA;
+}
+
+/* ── Status header: reserved status illustration + title ─────────── */
+
+.status-header {
+    -fx-alignment: center-left;
+}
+
+/* The status-illustration slot (StackPane.status-image holding two ImageViews)
+   is fitted to 64x64 in JavaFxUpdateView and hidden (managed=false) while no
+   art is shown, so an empty slot contributes no height and never breaks the
+   layout. Phase switches cross-fade between the two stacked ImageViews. */
+
+/* ── Overall progress area ──────────────────────────────────────── */
+
+.overall-progress .progress-bar {
+    -fx-pref-height: 8px;
+    -fx-min-height: 8px;
+    -fx-max-height: 8px;
+}
+
+.overall-progress .pct {
+    -fx-font-size: 12px;
+    -fx-text-fill: #6B7681;
+}
+
+/* ── Progress bar core: flat track + bar, no shadow/glow/border ────
+   Both the 8px overall bar and the 6px per-file bar share this look;
+   only their heights differ (.file-progress below). */
+
+.progress-bar {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    /* Controls default their max width to their pref width (100px), which
+       stops HBox/VBox from growing them to fill the column. Lift that cap so
+       the 8px/6px bars span the full width. */
+    -fx-max-width: Infinity;
+}
+
+.progress-bar > .track {
+    -fx-background-color: #232B31;
+    -fx-background-insets: 0;
+    -fx-background-radius: 4px;
+    -fx-border-width: 0;
+    -fx-effect: null;
+}
+
+.progress-bar > .bar {
+    -fx-background-color: #5DD35D;
+    -fx-background-insets: 0;
+    -fx-background-radius: 4px;
+    -fx-padding: 0;
+    -fx-effect: null;
+}
+
+/* Indeterminate keeps the flat fill (no gradient). The segment movement is
+   the control's built-in behaviour, not an added animation. */
+.progress-bar:indeterminate > .bar {
+    -fx-background-color: #5DD35D;
+}
+
+/* ── Current-file area ──────────────────────────────────────────── */
+
+.file-path {
+    -fx-font-size: 13px;
+    -fx-text-fill: #A8B0BA;
+    /* Leading ellipsis: a long path truncates at the head so the file name at
+       the end of the path — the useful part — stays visible. */
+    -fx-text-overrun: leading-ellipsis;
+}
+
+.file-progress {
+    -fx-pref-height: 6px;
+    -fx-min-height: 6px;
+    -fx-max-height: 6px;
+}
+
+.download-speed {
+    -fx-font-size: 12px;
+    -fx-text-fill: #6B7681;
+}
+
+/* ── Details pane (lightweight, flat collapsible area) ───────────── */
+
+.details-pane {
+    -fx-background-color: #161C21;
+    -fx-background-insets: 0;
+    -fx-background-radius: 6px;
+    -fx-border-color: #2A3238;
+    -fx-border-width: 1px;
+    -fx-border-radius: 6px;
+    -fx-text-fill: #A8B0BA;
+    -fx-font-size: 12px;
+}
+
+.details-pane:focused {
+    -fx-border-color: #3A454D;
+}
+
+.details-pane > .title {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-background-radius: 0;
+    -fx-padding: 8px 12px 8px 12px;
+    -fx-text-fill: #A8B0BA;
+    -fx-font-weight: 600;
+}
+
+.details-pane > .title > .arrow-button {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-padding: 0 4px 0 0;
+}
+
+/* The expand arrow is a muted secondary affordance so it never competes with
+   the main status; it only takes the accent on hover / focus. The -fx-effect
+   reset also kills the default green focus glow. */
+.details-pane > .title > .arrow-button .arrow {
+    -fx-background-color: #6B7681;
+    -fx-background-insets: 0;
+    -fx-effect: null;
+}
+.details-pane > .title > .arrow-button:hover .arrow,
+.details-pane > .title > .arrow-button:focused .arrow {
+    -fx-background-color: #5DD35D;
+    -fx-effect: null;
+}
+
+.details-pane > .content {
+    -fx-background-color: #161C21;
+    -fx-background-insets: 0;
+    -fx-border-width: 0;
+    -fx-padding: 0 12px 12px 12px;
+}
+
+.details-pane .label {
+    -fx-text-fill: #A8B0BA;
+    -fx-font-size: 12px;
+}
+
+/* ── Log area (TextArea) ────────────────────────────────────────── */
+
+.details-pane .log {
+    -fx-background-color: #161C21;
+    -fx-background-insets: 0;
+    -fx-background-radius: 4px;
+    -fx-border-color: #2A3238;
+    -fx-border-width: 1px;
+    -fx-border-radius: 4px;
+    -fx-font-family: "Consolas", "Menlo", monospace;
+    -fx-font-size: 12px;
+    -fx-text-fill: #A8B0BA;
+    -fx-highlight-fill: #3A454D;
+    -fx-highlight-text-fill: #E6E8EB;
+    -fx-focus-color: transparent;
+    -fx-faint-focus-color: transparent;
+}
+
+.details-pane .log .content {
+    -fx-background-color: #161C21;
+    -fx-background-insets: 0;
+    -fx-padding: 6px 8px 6px 8px;
+}
+
+.details-pane .log:focused {
+    -fx-border-color: #3A454D;
+}
+
+/* Slim dark scrollbars inside the log. */
+.details-pane .log .scroll-bar {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-background-radius: 0;
+}
+.details-pane .log .scroll-bar:vertical { -fx-pref-width: 10px; }
+.details-pane .log .scroll-bar:horizontal { -fx-pref-height: 10px; }
+.details-pane .log .scroll-bar .track {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+}
+.details-pane .log .scroll-bar .thumb {
+    -fx-background-color: #2A3238;
+    -fx-background-insets: 1px;
+    -fx-background-radius: 4px;
+}
+.details-pane .log .scroll-bar .increment-button,
+.details-pane .log .scroll-bar .decrement-button {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+    -fx-pref-width: 0;
+    -fx-pref-height: 0;
+}
+.details-pane .log .scroll-bar .corner {
+    -fx-background-color: transparent;
+}
+
+/* ── Buttons: normal / hover / pressed / disabled / focus ────────── */
+
+.button {
+    -fx-background-color: #1E262C;
+    -fx-background-insets: 0;
+    -fx-background-radius: 6px;
+    -fx-border-color: #2A3238;
+    -fx-border-width: 1px;
+    -fx-border-radius: 6px;
+    -fx-text-fill: #E6E8EB;
+    -fx-font-size: 13px;
+    -fx-padding: 6px 16px 6px 16px;
+    -fx-focus-color: transparent;
+    -fx-faint-focus-color: transparent;
+}
+.button:hover {
+    -fx-background-color: #232B31;
+    -fx-border-color: #3A454D;
+}
+.button:pressed {
+    -fx-background-color: #161C21;
+}
+.button:focused {
+    -fx-border-color: #5DD35D;
+}
+.button:disabled {
+    -fx-opacity: 0.4;
+    -fx-text-fill: #6B7681;
+}
+
+/* Debug-only secondary close button. */
+.debug-close-button {
+    -fx-background-color: transparent;
+    -fx-border-color: #2A3238;
+    -fx-text-fill: #A8B0BA;
+}
+.debug-close-button:hover {
+    -fx-background-color: #1E262C;
+    -fx-border-color: #3A454D;
+}
+.debug-close-button:pressed {
+    -fx-background-color: #161C21;
+}
+.debug-close-button:focused {
+    -fx-border-color: #5DD35D;
+}
+.debug-close-button:disabled {
+    -fx-opacity: 0.4;
+    -fx-text-fill: #6B7681;
+}
+
+/* Debug footer: a full-width hairline separates the content from the close
+   button row, anchoring the button as a footer rather than an isolated
+   control in the corner. */
+.debug-footer-separator {
+    -fx-padding: 0;
+}
+.debug-footer-separator .line {
+    -fx-background-color: #2A3238;
+    -fx-border-color: transparent;
+    -fx-padding: 0;
+}
+
+/* Persistent bottom attribution line — small, muted, centred. It sits below
+   the Details pane (and the debug footer when present) and never changes with
+   the phase. */
+.footer-copyright {
+    -fx-font-size: 11px;
+    -fx-text-fill: #6B7681;
+}
+
+/* Destructive action inside the Quit-update Alert. */
+.danger-button {
+    -fx-background-color: #E05252;
+    -fx-border-color: #E05252;
+    -fx-text-fill: #FFFFFF;
+}
+.danger-button:hover {
+    -fx-background-color: #C84A4A;
+    -fx-border-color: #C84A4A;
+}
+.danger-button:pressed {
+    -fx-background-color: #B04343;
+    -fx-border-color: #B04343;
+}
+.danger-button:focused {
+    -fx-border-color: #FFFFFF;
+}
+
+/* ── Terminal state classes (maintained on .root by setPhase) ─────── */
+
+.root.success-state .status-title {
+    -fx-text-fill: #3FAE57;
+}
+
+.root.error-state .status-title {
+    -fx-text-fill: #E05252;
+}
+
+/* The error description takes a softened red so the main title carries the
+   primary emphasis (round-2 refinement). */
+.root.error-state .status-description {
+    -fx-text-fill: #C56F6F;
+}
+
+/* ── Quit-update Alert shares the same visual system ──────────────── */
+
+.dialog-pane {
+    -fx-background-color: #0F1417;
+    -fx-background-insets: 0;
+    -fx-background-radius: 10px;
+    -fx-padding: 16px;
+}
+
+.dialog-pane .label {
+    -fx-text-fill: #A8B0BA;
+}
+
+.dialog-pane > .content.label {
+    -fx-font-size: 13px;
+}
+
+.dialog-pane > .button-bar {
+    -fx-background-color: transparent;
+    -fx-padding: 12px 0 0 0;
+}
+
+.dialog-pane > .button-bar .container {
+    -fx-padding: 0;
+}

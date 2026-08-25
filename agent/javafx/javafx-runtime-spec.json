@@ -1,0 +1,11 @@
+{
+  "version": "21.0.4",
+  "min_jdk": 17,
+  "module_path": "21.0.4",
+  "modules": ["javafx.controls"],
+  "artifacts": [
+    { "module": "javafx-base",     "classifier": "win", "file": "javafx-base-21.0.4-win.jar",     "size": 753983,  "hash": "daedb2fe921bf1c03c43f032078f01f6201d5ffa86ce353f4bac77b0d7eae346" },
+    { "module": "javafx-graphics", "classifier": "win", "file": "javafx-graphics-21.0.4-win.jar", "size": 5941675, "hash": "f0a0e80d0a4c75966070823d92bf9c051d34c1fa75525e9ef7687d15a918799c" },
+    { "module": "javafx-controls", "classifier": "win", "file": "javafx-controls-21.0.4-win.jar", "size": 2585128, "hash": "1a958b25299bfda612475c6062b98002178124cab3cc5f76e82b6ead21cc7a6d" }
+  ]
+}
