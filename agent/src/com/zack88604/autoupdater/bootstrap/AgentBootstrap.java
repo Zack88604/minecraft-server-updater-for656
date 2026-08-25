@@ -20,27 +20,20 @@ package com.zack88604.autoupdater.bootstrap;
 import com.zack88604.autoupdater.config.AgentConfig;
 import com.zack88604.autoupdater.domain.FileEntry;
 import com.zack88604.autoupdater.domain.UpdateResult;
+import com.zack88604.autoupdater.infrastructure.files.FileManager;
+import com.zack88604.autoupdater.infrastructure.http.ServerClient;
+import com.zack88604.autoupdater.infrastructure.json.JsonParser;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
-import java.io.*;
+import java.io.File;
+import java.io.IOException;
 import java.lang.instrument.Instrumentation;
-import java.net.HttpURLConnection;
-import java.net.URI;
 import java.net.URLDecoder;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.CountDownLatch;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public final class AgentBootstrap {
 
@@ -110,8 +103,8 @@ public final class AgentBootstrap {
         private long dlLastTime  = 0;
 
         private String gameDir;
-        private List<String> serverUrls;
-        private int currentServerIndex = 0;
+        private FileManager fileManager;
+        private ServerClient serverClient;
         private final CountDownLatch latch;
         private final boolean debug;
         private JLabel serverLabel;
@@ -180,8 +173,28 @@ public final class AgentBootstrap {
             }
 
             // The bootstrap has already resolved configuration and populated this property.
-            serverUrls = parseServerList(
+            List<String> configuredServers = parseServerList(
                     System.getProperty(PROP_SERVER, AgentConfig.DEFAULT_SERVER));
+            fileManager = new FileManager(new File(gameDir));
+            serverClient = new ServerClient(configuredServers, new ServerClient.Listener() {
+                @Override
+                public void onLog(String message) {
+                    log(message);
+                }
+
+                @Override
+                public void onServerChanged(List<String> serverUrls, String currentServer) {
+                    updateServerLabel();
+                }
+
+                @Override
+                public void onDownloadProgress(long totalBytes, long downloadedBytes) {
+                    if (totalBytes > 0) {
+                        dlTotalBytes = totalBytes;
+                    }
+                    dlDownloadedBytes = downloadedBytes;
+                }
+            });
         }
 
         /** Parse comma-separated server URLs, trimming whitespace from each. */
@@ -199,31 +212,14 @@ public final class AgentBootstrap {
             return list;
         }
 
-        /** Resolve a manifest/config path beneath the game directory. */
-        private File resolveManagedFile(String relativePath) {
-            if (relativePath == null || relativePath.isEmpty()) return null;
-            String path = relativePath.replace('\\', '/');
-            if (path.startsWith("/") || path.matches("^[A-Za-z]:.*")) return null;
-            for (String segment : path.split("/")) {
-                if ("..".equals(segment)) return null;
-            }
-            try {
-                File base = new File(gameDir).getCanonicalFile();
-                File target = new File(base, path.replace('/', File.separatorChar))
-                .getCanonicalFile();
-                return target.toPath().startsWith(base.toPath()) ? target : null;
-            } catch (IOException | SecurityException e) {
-                return null;
-            }
-        }
-
         /** Get the currently active server URL. */
         private String currentServer() {
-            return serverUrls.get(currentServerIndex);
+            return serverClient.getCurrentServer();
         }
 
         /** Update the server label in the top panel. */
         private void updateServerLabel() {
+            List<String> serverUrls = serverClient.getServerUrls();
             String display = serverUrls.size() <= 1
                     ? "Server: " + currentServer()
                     : "Servers (" + serverUrls.size() + "): " + currentServer();
@@ -422,6 +418,7 @@ public final class AgentBootstrap {
 
         /** Performs blocking network and file work; no Swing components are touched here. */
         private UpdateResult performUpdate() throws Exception {
+            List<String> serverUrls = serverClient.getServerUrls();
             log("Servers (" + serverUrls.size() + "):");
             for (int i = 0; i < serverUrls.size(); i++) {
                 log("  [" + (i + 1) + "] " + serverUrls.get(i));
@@ -431,12 +428,12 @@ public final class AgentBootstrap {
             // 1. fetch manifest (with multi-server fallback)
             setStatus("Checking for updates...", true);
             log("Fetching manifest...");
-            String manifestJson = httpGetWithFallback("/api/v2/manifest");
+            String manifestJson = serverClient.getWithFallback("/api/v2/manifest");
 
             // 0. self-update check — must happen before regular file sync
             checkSelfUpdate(manifestJson);
 
-            String filesArray = jsonGetArray(manifestJson, "files");
+            String filesArray = JsonParser.getArray(manifestJson, "files");
             if (filesArray == null) {
                 throw new IOException("Cannot parse manifest");
             }
@@ -444,13 +441,15 @@ public final class AgentBootstrap {
             List<FileEntry> manifestFiles = parseFileEntries(filesArray);
             log("Manifest contains " + manifestFiles.size() + " file(s)");
 
-            String managedArray = jsonGetArray(manifestJson, "managed_paths");
-            List<String> managedPaths = parseStringArray(managedArray != null ? managedArray : "");
+            String managedArray = JsonParser.getArray(manifestJson, "managed_paths");
+            List<String> managedPaths = JsonParser.parseStringArray(
+                    managedArray != null ? managedArray : "");
             log("Managed paths:");
             for (String p : managedPaths) log("  - " + p);
 
-            String excludedArray = jsonGetArray(manifestJson, "excluded_paths");
-            List<String> excludedPaths = parseStringArray(excludedArray != null ? excludedArray : "");
+            String excludedArray = JsonParser.getArray(manifestJson, "excluded_paths");
+            List<String> excludedPaths = JsonParser.parseStringArray(
+                    excludedArray != null ? excludedArray : "");
             if (!excludedPaths.isEmpty()) {
                 log("Excluded paths:");
                 for (String p : excludedPaths) log("  - " + p);
@@ -467,7 +466,7 @@ public final class AgentBootstrap {
                 checked++;
                 String relPath = entry.getPath();
 
-                File localFile = resolveManagedFile(relPath);
+                File localFile = fileManager.resolveManagedFile(relPath);
                 if (localFile == null) {
                     log("  [REJECT] " + relPath + " (unsafe manifest path)");
                     failed++;
@@ -481,7 +480,7 @@ public final class AgentBootstrap {
                     log("  [MISS]  " + relPath);
                     needDownload = true;
                 } else {
-                    String localHash = sha256(localFile);
+                    String localHash = fileManager.sha256(localFile);
                     if (localHash == null) {
                         log("  [WARN]  " + relPath + " (cannot read, re-downloading)");
                         needDownload = true;
@@ -509,19 +508,23 @@ public final class AgentBootstrap {
                     long dlStart = dlLastTime;
 
                     // URL-encode each path segment for the download URL
-                    String encodedPath = encodePath(relPath);
-                    boolean ok = httpDownloadWithFallback("/api/files/" + encodedPath, tmpFile);
+                    String encodedPath = ServerClient.encodePath(relPath);
+                    boolean ok = serverClient.downloadWithFallback(
+                            "/api/files/" + encodedPath, tmpFile);
                     dlActive = false;
 
                     if (ok) {
-                        String dlHash = sha256(tmpFile);
+                        String dlHash = fileManager.sha256(tmpFile);
                         if (dlHash != null && dlHash.equals(entry.getSha256())) {
-                            if (replaceDownloadedFile(tmpFile, localFile, relPath)) {
+                            try {
+                                fileManager.replaceDownloadedFile(tmpFile, localFile);
                                 long dlElapsed = System.currentTimeMillis() - dlStart;
                                 double avgSpeed = dlElapsed > 0 ? entry.getSize() * 1000.0 / dlElapsed : 0;
                                 log("         -> Done (" + entry.getSize() + " bytes, " + formatSpeed(avgSpeed) + ")");
                                 updated++;
-                            } else {
+                            } catch (IOException e) {
+                                log("  [FAIL]  " + relPath + ": cannot replace file ("
+                                        + e.getMessage() + ")");
                                 log("  [FAIL]  " + relPath + ": cannot move file");
                                 tmpFile.delete();
                                 failed++;
@@ -547,7 +550,7 @@ public final class AgentBootstrap {
 
             // 3. clean stale files
             log("Cleaning stale files...");
-            cleanStaleFiles(manifestFiles, managedPaths, excludedPaths);
+            fileManager.cleanStaleFiles(manifestFiles, managedPaths, excludedPaths, this::log);
 
             return new UpdateResult(updated, failed);
         }
@@ -594,217 +597,8 @@ public final class AgentBootstrap {
         }
 
         // ═══════════════════════════════════════════════════════════
-        //  Network utilities (multi-server with fallback)
+        //   Manifest mapping
         // ═══════════════════════════════════════════════════════════
-
-        /** URL-encode each segment of a path (e.g. "mods/my mod.jar" -> "mods/my%20mod.jar") */
-        private static String encodePath(String relPath) {
-            StringBuilder sb = new StringBuilder();
-            for (String seg : relPath.split("/")) {
-                if (sb.length() > 0) sb.append('/');
-                sb.append(URLEncoder.encode(seg, StandardCharsets.UTF_8).replace("+", "%20"));
-            }
-            return sb.toString();
-        }
-
-        /** HTTP GET with fallback: try each server in order until one succeeds. */
-        private String httpGetWithFallback(String path) throws IOException {
-            IOException lastException = null;
-            int startIndex = currentServerIndex;
-            // Try from current server through the end, then wrap around
-            for (int i = 0; i < serverUrls.size(); i++) {
-                int idx = (startIndex + i) % serverUrls.size();
-                String url = serverUrls.get(idx) + path;
-                try {
-                    if (idx != currentServerIndex) {
-                        log("Trying server: " + serverUrls.get(idx));
-                    }
-                    String result = httpGet(url);
-                    // Success — switch to this server for subsequent requests
-                    if (idx != currentServerIndex) {
-                        log("Switched to server: " + serverUrls.get(idx));
-                        currentServerIndex = idx;
-                        updateServerLabel();
-                    }
-                    return result;
-                } catch (IOException e) {
-                    lastException = e;
-                    log("  [WARN]  Server unreachable: " + serverUrls.get(idx));
-                }
-            }
-            throw lastException != null ? lastException
-                    : new IOException("All servers unreachable");
-        }
-
-        private String httpGet(String urlStr) throws IOException {
-            HttpURLConnection conn = (HttpURLConnection) URI.create(urlStr).toURL().openConnection();
-            conn.setRequestMethod("GET");
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(30000);
-            conn.setRequestProperty("Accept", "application/json");
-            try (BufferedReader r = new BufferedReader(
-                    new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
-                StringBuilder sb = new StringBuilder();
-                String line;
-                while ((line = r.readLine()) != null) sb.append(line);
-                return sb.toString();
-            } finally {
-                conn.disconnect();
-            }
-        }
-
-        /** HTTP download with fallback: try each server in order until one succeeds. */
-        private boolean httpDownloadWithFallback(String path, File dest) {
-            int startIndex = currentServerIndex;
-            for (int i = 0; i < serverUrls.size(); i++) {
-                int idx = (startIndex + i) % serverUrls.size();
-                String url = serverUrls.get(idx) + path;
-                if (idx != currentServerIndex) {
-                    log("Trying server: " + serverUrls.get(idx));
-                }
-                if (httpDownload(url, dest)) {
-                    // Success — switch to this server for subsequent requests
-                    if (idx != currentServerIndex) {
-                        log("Switched to server: " + serverUrls.get(idx));
-                        currentServerIndex = idx;
-                        updateServerLabel();
-                    }
-                    return true;
-                }
-                log("  [WARN]  Download failed from: " + serverUrls.get(idx));
-            }
-            return false;
-        }
-
-        private boolean httpDownload(String urlStr, File dest) {
-            try {
-                HttpURLConnection conn = (HttpURLConnection) URI.create(urlStr).toURL().openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(10000);
-                conn.setReadTimeout(60000);
-                // Use Content-Length from server if available (more accurate)
-                int contentLength = conn.getContentLength();
-                if (contentLength > 0) dlTotalBytes = contentLength;
-                try (InputStream in = conn.getInputStream();
-                     FileOutputStream out = new FileOutputStream(dest)) {
-                    byte[] buf = new byte[8192];
-                    int n;
-                    while ((n = in.read(buf)) != -1) {
-                        out.write(buf, 0, n);
-                        dlDownloadedBytes += n;
-                    }
-                } finally {
-                    conn.disconnect();
-                }
-                return true;
-            } catch (IOException e) {
-                return false;
-            }
-        }
-
-        // ═══════════════════════════════════════════════════════════
-        //   File utilities
-        // ═══════════════════════════════════════════════════════════
-
-        private String sha256(File file) {
-            try (FileInputStream fis = new FileInputStream(file)) {
-                MessageDigest md = MessageDigest.getInstance("SHA-256");
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = fis.read(buf)) != -1) md.update(buf, 0, n);
-                byte[] digest = md.digest();
-                StringBuilder sb = new StringBuilder();
-                for (byte b : digest) sb.append(String.format("%02x", b));
-                return sb.toString();
-            } catch (Exception e) {
-                return null;
-            }
-        }
-
-        private boolean replaceDownloadedFile(File tmpFile, File localFile, String relPath) {
-            try {
-                Files.move(tmpFile.toPath(), localFile.toPath(),
-                        StandardCopyOption.ATOMIC_MOVE,
-                        StandardCopyOption.REPLACE_EXISTING);
-                return true;
-            } catch (AtomicMoveNotSupportedException e) {
-                try {
-                    Files.move(tmpFile.toPath(), localFile.toPath(),
-                            StandardCopyOption.REPLACE_EXISTING);
-                    return true;
-                } catch (IOException fallbackError) {
-                    log("  [FAIL]  " + relPath + ": cannot replace file ("
-                            + fallbackError.getMessage() + ")");
-                }
-            } catch (IOException e) {
-                log("  [FAIL]  " + relPath + ": cannot replace file ("
-                        + e.getMessage() + ")");
-            }
-            return false;
-        }
-
-        // ═══════════════════════════════════════════════════════════
-        //   Lightweight JSON parser (no external deps)
-        // ═══════════════════════════════════════════════════════════
-
-        private static String jsonGetString(String json, String key) {
-            Pattern p = Pattern.compile("\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
-            Matcher m = p.matcher(json);
-            return m.find() ? m.group(1) : null;
-        }
-
-        /** Extract an integer value for a key (unquoted number) */
-        private static int jsonGetInt(String json, String key, int defaultVal) {
-            Pattern p = Pattern.compile("\"" + key + "\"\\s*:\\s*(-?\\d+)");
-            Matcher m = p.matcher(json);
-            if (m.find()) {
-                try { return Integer.parseInt(m.group(1)); }
-                catch (NumberFormatException ignored) {}
-            }
-            return defaultVal;
-        }
-
-        /** Extract a long integer value for a key */
-        private static long jsonGetLong(String json, String key, long defaultVal) {
-            Pattern p = Pattern.compile("\"" + key + "\"\\s*:\\s*(-?\\d+)");
-            Matcher m = p.matcher(json);
-            if (m.find()) {
-                try { return Long.parseLong(m.group(1)); }
-                catch (NumberFormatException ignored) {}
-            }
-            return defaultVal;
-        }
-
-        /** Extract a JSON object value for a key (e.g. "agent": {...}) */
-        private static String jsonGetObject(String json, String key) {
-            int k = json.indexOf("\"" + key + "\"");
-            if (k < 0) return null;
-            int start = json.indexOf('{', k);
-            if (start < 0) return null;
-            int depth = 1, i = start + 1;
-            while (i < json.length() && depth > 0) {
-                char c = json.charAt(i);
-                if (c == '{') depth++;
-                else if (c == '}') depth--;
-                i++;
-            }
-            return json.substring(start, i);
-        }
-
-        private static String jsonGetArray(String json, String key) {
-            int k = json.indexOf("\"" + key + "\"");
-            if (k < 0) return null;
-            int start = json.indexOf('[', k);
-            if (start < 0) return null;
-            int depth = 1, i = start + 1;
-            while (i < json.length() && depth > 0) {
-                char c = json.charAt(i);
-                if (c == '[') depth++;
-                else if (c == ']') depth--;
-                i++;
-            }
-            return json.substring(start + 1, i - 1).trim();
-        }
 
         private static List<FileEntry> parseFileEntries(String filesArray) {
             List<FileEntry> list = new ArrayList<>();
@@ -817,9 +611,9 @@ public final class AgentBootstrap {
                     depth--;
                     if (depth == 0 && start >= 0) {
                         String obj = filesArray.substring(start, i + 1);
-                        String path = jsonGetString(obj, "path");
-                        String hash = jsonGetString(obj, "hash");
-                        int size = jsonGetInt(obj, "size", -1);
+                        String path = JsonParser.getString(obj, "path");
+                        String hash = JsonParser.getString(obj, "hash");
+                        int size = JsonParser.getInt(obj, "size", -1);
                         if (path != null && hash != null && size >= 0) {
                             list.add(new FileEntry(path, hash, size));
                         }
@@ -828,103 +622,6 @@ public final class AgentBootstrap {
                 }
             }
             return list;
-        }
-
-        private static List<String> parseStringArray(String arrayStr) {
-            List<String> list = new ArrayList<>();
-            if (arrayStr.isEmpty()) return list;
-            Pattern p = Pattern.compile("\"([^\"]*)\"");
-            Matcher m = p.matcher(arrayStr);
-            while (m.find()) list.add(m.group(1));
-            // handle bare '*' wildcard
-            if (list.isEmpty() && !arrayStr.isEmpty()) list.add("*");
-            return list;
-        }
-
-        // ═══════════════════════════════════════════════════════════
-        //  Cleanup
-        // ═══════════════════════════════════════════════════════════
-
-        private void cleanStaleFiles(List<FileEntry> manifestFiles, List<String> managedPaths,
-                                      List<String> excludedPaths) {
-            Set<String> manifestSet = new HashSet<>();
-            for (FileEntry e : manifestFiles) manifestSet.add(e.getPath());
-            for (String mp : managedPaths) {
-                if (mp.equals("*")) continue;
-                String pathToResolve = mp.endsWith("/")
-                ? mp.substring(0, mp.length() - 1)
-                : mp;
-                File managedFile = resolveManagedFile(pathToResolve);
-                if (managedFile == null) {
-                    log("  [REJECT] " + mp + " (unsafe managed path)");
-                    continue;
-                }
-                if (mp.endsWith("/")) {
-                    // Directory path: recursively clean this directory
-                    File dir = managedFile;
-                    if (dir.isDirectory()) {
-                        deleteStaleInDir(dir, gameDir, manifestSet, excludedPaths);
-                    }
-                } else {
-                    // Exact file path: check if this file is in manifest
-                    File file = managedFile;
-                    if (file.isFile() && !file.getName().startsWith(".")) {
-                        String rel = mp.replace('\\', '/');
-                        if (isExcluded(rel, excludedPaths)) {
-                            log("  [SKIP]  " + mp + " (excluded)");
-                            continue;
-                        }
-                        if (!manifestSet.contains(rel)) {
-                            log("  [DEL]   " + rel + " (not in manifest)");
-                            file.delete();
-                        }
-                    }
-                }
-            }
-        }
-
-        private boolean isExcluded(String relPath, List<String> excludedPaths) {
-            if (excludedPaths == null || excludedPaths.isEmpty()) return false;
-            for (String ep : excludedPaths) {
-                if (ep.equals("*")) continue;
-                if (ep.endsWith("/")) {
-                    // Directory exclusion: path starting with this prefix is excluded
-                    if (relPath.equals(ep.substring(0, ep.length() - 1))
-                            || relPath.startsWith(ep)) {
-                        return true;
-                    }
-                } else {
-                    // Exact file exclusion
-                    if (relPath.equals(ep)) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
-
-        private void deleteStaleInDir(File dir, String baseDir, Set<String> manifestSet,
-                                       List<String> excludedPaths) {
-            File[] children = dir.listFiles();
-            if (children == null) return;
-            for (File child : children) {
-                if (child.isDirectory()) {
-                    deleteStaleInDir(child, baseDir, manifestSet, excludedPaths);
-                } else if (child.isFile() && !child.getName().startsWith(".")) {
-                    String rel = child.getAbsolutePath()
-                            .substring(new File(baseDir).getAbsolutePath().length() + 1)
-                            .replace('\\', '/');
-                    // Check if excluded
-                    if (isExcluded(rel, excludedPaths)) {
-                        log("  [SKIP]  " + rel + " (excluded)");
-                        continue;
-                    }
-                    if (!manifestSet.contains(rel)) {
-                        log("  [DEL]   " + rel + " (not in manifest)");
-                        child.delete();
-                    }
-                }
-            }
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -953,13 +650,13 @@ public final class AgentBootstrap {
 
         /** Check manifest for agent update; download if newer. */
         private void checkSelfUpdate(String manifestJson) {
-            String agentObj = jsonGetObject(manifestJson, "agent");
+            String agentObj = JsonParser.getObject(manifestJson, "agent");
             if (agentObj == null) {
                 log("  [SKIP]  No agent info in manifest");
                 return;
             }
-            String agentHash = jsonGetString(agentObj, "hash");
-            long agentSize = jsonGetLong(agentObj, "size", -1);
+            String agentHash = JsonParser.getString(agentObj, "hash");
+            long agentSize = JsonParser.getLong(agentObj, "size", -1);
             if (agentHash == null || agentSize <= 0) {
                 log("  [SKIP]  Incomplete agent info in manifest");
                 return;
@@ -979,7 +676,7 @@ public final class AgentBootstrap {
 
             log("Checking agent update...");
             log("  My path:    " + myJarPath);
-            String myHash = sha256(myJar);
+            String myHash = fileManager.sha256(myJar);
             if (myHash == null) {
                 log("  [SKIP]  Cannot compute local agent hash");
                 return;
@@ -1003,7 +700,7 @@ public final class AgentBootstrap {
             dlLastBytes = 0;
             dlLastTime = System.currentTimeMillis();
 
-            boolean ok = httpDownloadWithFallback("/api/agent", newJar);
+            boolean ok = serverClient.downloadWithFallback("/api/agent", newJar);
             dlActive = false;
             resetDownloadProgress();
 
@@ -1013,7 +710,7 @@ public final class AgentBootstrap {
                 return;
             }
 
-            String dlHash = sha256(newJar);
+            String dlHash = fileManager.sha256(newJar);
             if (dlHash == null || !dlHash.equals(agentHash)) {
                 log("  [FAIL]  Agent hash mismatch after download");
                 newJar.delete();
