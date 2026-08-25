@@ -37,11 +37,9 @@ class UpdateApplication {
         UpdateView view = new UpdateGUI(controller, new UiModel(gameDir, debug));
         controller.attach(view);
         controller.start();
-        // Best-effort background worker: when the local JavaFX runtime is
-        // missing/corrupt relative to the embedded spec, repair it from Maven
-        // Central so a later helper launch finds a fresh runtime. Runs on every
-        // Swing launch; never blocks the update flow.
-        JavaFxRuntimeManager.startWorker(controller);
+        // The JavaFX runtime repair is no longer a background daemon — it runs
+        // synchronously inside the update flow (UpdateService.runFlow, same
+        // stage as the self-update check) and never fails the flow.
     }
 
     /**

@@ -70,6 +70,8 @@ cd agent
 | `PORT` | `25565` | HTTP 端口 |
 | `GENERATE_TOKEN` | *(空)* | 保护 `/api/generate` 接口 |
 | `DEBUG` | `false` | Flask 调试模式 |
+| `HOST` | `0.0.0.0` | 监听地址 |
+| `DATA_DIR` | `/data` | 数据根目录（含 `files/`、`agent/`、`logs/`、`manifest.json`） |
 
 ### Agent（JVM 属性）
 
@@ -128,7 +130,7 @@ server=http://cdn1.example.com:25565,http://cdn2.example.com:8443
 
 | 阶段 | 视觉表现 |
 |------|----------|
-| **Preparing（准备中）** | 获取清单并执行自更新检查 — 不确定状态进度条。更新器自更新是该阶段的子状态。 |
+| **Preparing（准备中）** | 获取清单、执行自更新检查与 JavaFX runtime 修复 — 不确定状态进度条。更新器自更新是该阶段的子状态。 |
 | **Checking（检查中）** | 对照清单对受管文件进行哈希校验 — 确定性进度条 + 百分比（“X of Y files checked”）。 |
 | **Downloading（下载中）** | 下载受管文件；当前文件区域显示路径、单文件进度条与下载速度。 |
 | **Cleaning（清理中）** | 移除过期文件 — 不确定状态进度条。 |
@@ -143,7 +145,7 @@ server=http://cdn1.example.com:25565,http://cdn2.example.com:8443
 - **总体进度** — 细进度条 + 旁边的百分比（在 Preparing/Cleaning 不确定阶段隐藏）。
 - **当前文件区域** — 正在下载的文件/JAR：路径、单文件进度条、下载速度；空闲时隐藏。
 - **Details（可折叠）** — 服务器地址、游戏目录与完整日志；默认折叠，出错与调试模式下自动展开。
-- **关闭窗口** — 更新进行中关闭会弹窗确认（“Quit update?”）。终态阶段：成功会短暂延迟后自动关闭；失败（错误状态）则保持窗口打开，直到用户手动关闭——关闭错误窗口后进程退出、不启动 Minecraft。调试模式额外提供一个 Close 按钮，流程允许前保持禁用。
+- **关闭窗口** — 更新进行中关闭会弹窗确认（“Quit update?”）。终态阶段：成功会停留 2 秒（以便用户确认更新成功）后自动关闭；失败（错误状态）则保持窗口打开，直到用户手动关闭——关闭错误窗口后进程退出、不启动 Minecraft。调试模式额外提供一个 Close 按钮，流程允许前保持禁用。
 
 ### JavaFX 视图（独立 helper JVM）
 
@@ -157,10 +159,11 @@ runtime 缺失或损坏时，agent 静默改用 Swing 视图，Minecraft 启动�
 **runtime 来源完全在客户端。** 每个发行版本把
 `/javafx-runtime-spec.json`（版本、平台、文件名、大小、SHA-256）内置进核心
 JAR。agent jar 旁的 `javafx-runtime/` 只是**可自动重建的本地缓存**：干净机器
-首次启动用 Swing，后台 `javafx-runtime-worker` 从 Maven Central
-（`org/openjfx/...`）下载缺失/损坏的 jar，校验 SHA-256 后原子替换；
-JavaFX 视图从**下次**启动开始使用。服务端 manifest/API 完全不参与 JavaFX
-runtime。
+首次启动用 Swing，更新流程会把 runtime 修复作为一个**阻塞步骤**——与自更新
+检查同处于 PREPARING 阶段——从 Maven Central（`org/openjfx/...`）下载缺失/
+损坏的 jar，校验 SHA-256 后原子替换；流程会等待下载完成，无论成功还是失败
+都会继续更新；JavaFX 视图从**下次**启动开始使用。服务端 manifest/API 完全
+不参与 JavaFX runtime。
 
 使用方式：
 
@@ -193,8 +196,7 @@ runtime。
 
 ### 截图
 
-每一种界面状态都保存在 [`screenshots/`](screenshots/) 中 — 由开发工具
-`agent/devtools/UiScreenshotHarness.java` 离屏渲染生成：
+每一种界面状态都保存在 [`screenshots/`](screenshots/) 中 — 离屏渲染生成：
 
 | 文件 | 状态 |
 |------|------|
@@ -210,22 +212,6 @@ runtime。
 | `10_debug_close_enabled.png` | 调试窗口，流程完成后关闭按钮可用 |
 | `11_quit_alert.png` | “Quit update?” 退出确认弹窗 |
 
-> **重新生成占位插图与截图**（在 `agent/` 目录下）：
-> ```bash
-> # 1. 重新生成占位状态插图（写入 agent/images/）
-> javac -encoding UTF-8 -d build-harness devtools/GenImages.java
-> java -cp build-harness GenImages
->
-> # 2. 重新渲染每种界面状态到 screenshots/*.png
-> javac -encoding UTF-8 --module-path lib/javafx --add-modules javafx.controls,javafx.swing \
->       -cp "lib/javafx/*" -d build-harness src/*.java javafx/*.java devtools/*.java
-> cp javafx/ui.css build-harness/
-> java --module-path lib/javafx --add-modules javafx.controls,javafx.swing \
->       -cp "build-harness;.;lib/javafx/*" UiScreenshotHarness
-> ```
-> 类路径里的 `.`（即 `agent/` 目录）让视图能解析 `agent/images/` 下的
-> `/images/*.png`；正式构建改为从 JAR 内加载。
-
 ## 项目结构
 
 ```
@@ -233,7 +219,7 @@ runtime。
 ├── LICENSE
 ├── README.md
 ├── README_CN.md
-├── screenshots/              # 每种界面状态的截图，由开发工具生成
+├── screenshots/              # 每种界面状态的截图
 ├── server/
 │   ├── app.py                  # Flask API（清单、文件、Agent、配置、健康检查）
 │   ├── entrypoint.sh           # 容器入口
@@ -277,14 +263,6 @@ runtime。
     │   ├── JavaFxUpdateView.java    # 实现 UpdateView 的 JavaFX 视图（六种状态 + 状态插图槽位，由 /ui.css 提供样式）
     │   ├── ui.css                   # 窗口与对话框共用的深色扁平视觉系统
     │   └── javafx-runtime-spec.json # 内置纯客户端 spec：本地 runtime 缓存的版本/平台/artifact SHA-256
-    ├── devtools/               # 仅开发用工具 — 不打包进 Agent JAR
-    │   ├── UiScreenshotHarness.java  # 离屏渲染每种界面状态到 screenshots/*.png
-    │   ├── GenImages.java            # 生成占位状态插图到 images/
-    │   ├── ImageCheck.java           # 校验生成的插图（边界、图标、透明）
-    │   ├── ScreenshotProbe.java      # 校验每张截图是否显示了对应阶段插图
-    │   ├── PhaseSwitchTest.java      # JavaFX 视图快速连续阶段切换测试
-    │   ├── WindowBoundsCheck.java    # 校验 Details 展开时窗口居中/不越界
-    │   └── VerifyLocalProbe.java     # 覆盖 MISSING/READY/CORRUPTED 校验 JavaFxRuntimeManager.verifyLocal()
     ├── lib/javafx/             # JavaFX 21 运行时 jar（javafx-base/-graphics/-controls/-swing，win）— 编译期依赖 + 预置 runtime 来源
     ├── build.sh / build.bat    # 编译并打包两个 JAR（始终包含 JavaFX 视图、ui.css、images/、内置 spec）
     ├── make-distro.sh          # 可选发行包；--stage-runtime 预置 javafx-runtime/<ver>/ + runtime.json（不写 policy.json）

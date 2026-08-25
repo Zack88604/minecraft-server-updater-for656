@@ -16,9 +16,11 @@
  *   The JavaFX view runs in a separate helper JVM that never touches the
  *   Minecraft JVM's classpath. "auto" uses it when the local runtime (built
  *   from the embedded /javafx-runtime-spec.json) is READY and a child JVM can
- *   be spawned; otherwise the Swing view is used and a background worker
- *   best-effort repairs the runtime from Maven Central for the next launch.
- *   On a helper crash the flow falls back to Swing mid-run.
+ *   be spawned; otherwise the Swing view is used. In either case the update
+ *   flow repairs the runtime from Maven Central as a blocking step — the same
+ *   PREPARING stage as the self-update check — waiting for the download to
+ *   finish (success or failure) before continuing, so a later launch finds a
+ *   fresh runtime. On a helper crash the flow falls back to Swing mid-run.
  *
  * Compile:
  *   javac -d build src/*.java
@@ -119,6 +121,7 @@ public class UpdateAgent {
         // remove-javafx: delete the local JavaFX runtime, then run with Swing.
         if ("true".equalsIgnoreCase(agentArgs.get("remove-javafx"))) {
             JavaFxRuntimeManager.remove();
+            JavaFxRuntimeManager.suspendRepair();
             System.out.println("[UpdateAgent] JavaFX runtime removed; using Swing UI.");
             ui = "swing";
         }

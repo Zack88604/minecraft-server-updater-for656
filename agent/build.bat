@@ -53,7 +53,11 @@ if not exist "%RUNTIME_SPEC%" (
 echo [build] Compiling core + JavaFX helper view...
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 mkdir "%BUILD_DIR%"
-javac -encoding UTF-8 -cp "lib\javafx\*" -d "%BUILD_DIR%" "%SRC_DIR%\*.java" "%JAVAFX_SRC_DIR%\*.java"
+REM Enumerate all .java sources with cmd's FOR (no reliance on javac globbing;
+REM the quoted "*" form is passed literally on Windows and breaks the build).
+set "SOURCES="
+for %%f in ("%SRC_DIR%\*.java" "%JAVAFX_SRC_DIR%\*.java") do set "SOURCES=!SOURCES! "%%f""
+javac --release 17 -encoding UTF-8 -cp "lib\javafx\*" -d "%BUILD_DIR%" !SOURCES!
 if %ERRORLEVEL% neq 0 (
     echo [build] Compilation failed!
     exit /b 1
@@ -84,6 +88,7 @@ REM Restore Launcher class
 if exist Launcher.class.exclude ren Launcher.class.exclude Launcher.class
 
 cd /d "%SCRIPT_DIR%"
+
 rmdir /s /q "%BUILD_DIR%" 2>nul
 
 echo [build] Done!

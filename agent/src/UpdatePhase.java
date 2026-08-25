@@ -14,7 +14,8 @@
  * current-file area.
  */
 enum UpdatePhase {
-    /** Preparing: fetching the manifest and running the self-update check. */
+    /** Preparing: fetching the manifest, running the self-update check and
+     *  repairing the local JavaFX runtime. */
     PREPARING,
     /** Checking managed files against the manifest. */
     CHECKING,

@@ -140,6 +140,18 @@ class JavaFxUpdateView implements UpdateView {
     private int filesSeen;   // per-file downloads started in this run
     private int filesTotal;  // managed file count, captured from CHECKING text
 
+    // CLEANING counters backing the completion summary. In normal mode the
+    // per-file "[SKIP]" lines are dropped while CLEANING (see showLog), so the
+    // log only carries real changes ("[DEL]"); a single summary line then
+    // reports what the cleanup actually did instead of a flood of skip logs.
+    // Debug mode renders every line verbatim (the details pane is expanded for
+    // inspection), but still counts, so the summary stays accurate. Note: files
+    // already present in the manifest log nothing during the walk, so
+    // cleanScanned counts files the cleaner actively processed (excluded or
+    // stale), not the full directory walk.
+    private int cleanScanned;  // files the cleaner examined (excluded or stale)
+    private int cleanRemoved;  // stale files actually deleted
+
     // Details area (Server URL, Game Directory, full log)
     private final TitledPane detailsPane = new TitledPane("Details", null);
     private final Label lblServer = new Label("Server: -");
@@ -219,6 +231,8 @@ class JavaFxUpdateView implements UpdateView {
                 // A new run starts here — reset the file counters.
                 filesSeen = 0;
                 filesTotal = 0;
+                cleanScanned = 0;
+                cleanRemoved = 0;
                 lblStatus.setText("Preparing update…");
                 lblDescription.setText("Connecting to update server");
                 break;
@@ -254,9 +268,32 @@ class JavaFxUpdateView implements UpdateView {
         }
     }
 
-    /** Append one log line to the Details log. */
+    /**
+     * Append one log line to the Details log. While CLEANING, the per-file
+     * "[SKIP]" lines are suppressed in normal mode — they carry no real change
+     * and, on a slow machine with a large managed tree, the flood of them is
+     * what wedges the FX thread. Only actual changes ("[DEL]") are shown; both
+     * feed the cleaning summary emitted by {@link #showCompleted}. Debug mode
+     * renders every line verbatim (the details pane is expanded for inspection)
+     * but still counts, so the summary stays accurate. Lines outside the
+     * CLEANING phase always render verbatim.
+     */
     @Override
     public void showLog(String message) {
+        if (phase == UpdatePhase.CLEANING) {
+            if (message.startsWith("  [SKIP]")) {
+                cleanScanned++;
+                if (!debug) {
+                    return; // skip noise: count it, don't render it
+                }
+                // debug: fall through and render the full log
+            }
+            if (message.startsWith("  [DEL]")) {
+                cleanScanned++;
+                cleanRemoved++;
+                // fall through: a real change is rendered
+            }
+        }
         logArea.appendText(message + "\n");
     }
 
@@ -334,6 +371,12 @@ class JavaFxUpdateView implements UpdateView {
      */
     @Override
     public void showCompleted(UpdateResult result) {
+        // Cleaning summary: the per-file "[SKIP]" lines were suppressed during
+        // the walk (see showLog), so one line reports what the cleanup actually
+        // did instead of a flood of skip logs.
+        showLog("  [DONE]  Cleanup: scanned " + formatCount(cleanScanned)
+                + " file(s), removed " + formatCount(cleanRemoved)
+                + " stale file(s)");
         if (result.failed > 0) {
             // Partial failure — reuse the ERROR visual base state shared with
             // exception failures: setPhase(ERROR) hides the overall bar, resets

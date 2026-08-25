@@ -23,17 +23,21 @@ import java.util.List;
  *       {@code /javafx-runtime-spec.json} carried by the release itself
  *       (pure client bootstrap — the server manifest never describes the JavaFX
  *       runtime, v3改动说明);</li>
- *   <li>{@code startWorker()} — a daemon that, when the local runtime is
- *       missing, corrupt or outdated relative to the embedded spec, best-effort
- *       repairs it from Maven Central ({@code .tmp} + SHA-256 + atomic move).</li>
+ *   <li>{@code ensureReady()} — a synchronous, blocking, best-effort repair run
+ *       as a fixed step of the update flow (the same PREPARING stage as the
+ *       updater self-update check). When the local runtime is missing, corrupt
+ *       or outdated relative to the embedded spec it repairs it from Maven
+ *       Central ({@code .tmp} + SHA-256 + atomic move), and the flow waits for
+ *       the download to finish — success or failure — before continuing.</li>
  *   <li>{@code remove()} — the {@code remove-javafx} agent argument.</li>
  * </ul>
  *
  * Upgrades never delete the version currently in use this session: {@code install}
  * records it as {@code previous_version} in {@code runtime.json} and the deletion
  * is deferred until a later launch confirms the new-version helper actually works.
- * The worker runs best-effort — any failure (e.g. Maven Central unreachable) is
- * logged and ignored, never blocking the update flow or Minecraft launch.
+ * {@code ensureReady()} runs best-effort — any failure (e.g. Maven Central
+ * unreachable) is logged and ignored, never blocking or failing the update flow
+ * or the Minecraft launch.
  */
 final class JavaFxRuntimeManager {
 
@@ -45,6 +49,10 @@ final class JavaFxRuntimeManager {
 
     /** Install-completeness of the local runtime. */
     enum RuntimeStatus { READY, MISSING, CORRUPTED, UNSUPPORTED }
+
+    /** When true, the in-flow runtime repair is skipped (set by the
+     *  {@code remove-javafx} admin arg so a deleted runtime stays deleted). */
+    private static volatile boolean repairSuspended;
 
     // ── Runtime location ────────────────────────────────────────
 
@@ -154,46 +162,45 @@ final class JavaFxRuntimeManager {
         return RuntimeStatus.READY;
     }
 
-    // ── Background worker (network, best-effort) ────────────────
+    // ── Runtime repair (network, blocking, best-effort) ─────────
 
     /**
-     * Start the {@code javafx-runtime-worker} daemon. Runs on every launch that
-     * takes the Swing path (runtime not READY), so a later launch finds a fresh
-     * runtime. Best-effort: any failure is logged and swallowed.
+     * Synchronously make sure the local JavaFX runtime matches the embedded
+     * spec. Runs as a fixed step of the update flow — the same PREPARING stage
+     * as the updater self-update check. A READY runtime short-circuits; a
+     * missing, corrupt or outdated one is repaired from Maven Central, and the
+     * flow waits for the download to finish before continuing. Best-effort:
+     * whether the repair succeeds or fails the flow always continues — any
+     * failure is logged and swallowed, never blocking or failing the update.
      */
-    static void startWorker(UpdateListener listener) {
-        Thread t = new Thread(() -> {
-            try {
-                runWorker(listener);
-            } catch (Throwable t2) {
-                System.err.println("[javafx] Runtime worker error (best-effort, ignored): "
-                        + t2);
+    static void ensureReady(UpdateListener listener) {
+        try {
+            if (repairSuspended) {
+                log(listener, "[javafx] Runtime repair suspended (remove-javafx).");
+                return;
             }
-        }, "javafx-runtime-worker");
-        t.setDaemon(true);
-        t.start();
-    }
-
-    private static void runWorker(UpdateListener listener) throws IOException {
-        JavaFxSpec spec = loadEmbeddedSpec();
-        if (spec == null) {
-            log(listener, "[javafx] No embedded runtime spec; nothing to do.");
-            return;
+            JavaFxSpec spec = loadEmbeddedSpec();
+            if (spec == null) {
+                log(listener, "[javafx] No embedded runtime spec; nothing to do.");
+                return;
+            }
+            RuntimeStatus st = verifyLocal();
+            if (st == RuntimeStatus.READY) {
+                log(listener, "[javafx] Runtime " + spec.version + " up to date.");
+                return;
+            }
+            if (st == RuntimeStatus.UNSUPPORTED) {
+                log(listener, "[javafx] Current platform has no artifact in the embedded runtime spec.");
+                return;
+            }
+            log(listener, "[javafx] Runtime " + st + " (spec version " + spec.version
+                    + ") — repairing from Maven Central...");
+            ServerClient client = new ServerClient(Collections.emptyList());
+            client.setListener(listener);
+            install(spec, client, listener);
+        } catch (Throwable t) {
+            System.err.println("[javafx] Runtime repair error (best-effort, ignored): " + t);
         }
-        RuntimeStatus st = verifyLocal();
-        if (st == RuntimeStatus.READY) {
-            log(listener, "[javafx] Runtime " + spec.version + " up to date.");
-            return;
-        }
-        if (st == RuntimeStatus.UNSUPPORTED) {
-            log(listener, "[javafx] Current platform has no artifact in the embedded runtime spec.");
-            return;
-        }
-        log(listener, "[javafx] Runtime " + st + " (spec version " + spec.version
-                + ") — repairing from Maven Central...");
-        ServerClient client = new ServerClient(Collections.emptyList());
-        client.setListener(listener);
-        install(spec, client, listener);
     }
 
     /**
@@ -326,6 +333,12 @@ final class JavaFxRuntimeManager {
         if (dir != null && dir.isDirectory()) {
             deleteRecursive(dir);
         }
+    }
+
+    /** Suspend the in-flow runtime repair (used by the {@code remove-javafx}
+     *  admin arg so a deleted runtime is not silently re-downloaded). */
+    static void suspendRepair() {
+        repairSuspended = true;
     }
 
     // ── Embedded spec ───────────────────────────────────────────

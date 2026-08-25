@@ -5,6 +5,13 @@ agent/build/
 agent/build-harness/
 agent/distro/
 
+# Tools
+agent/devtools/
+
+# Local test runner scripts (reference the local devtools sources)
+agent/test.sh
+agent/test.bat
+
 # Local JavaFX runtime cache (rebuilt from Maven Central via the embedded spec)
 agent/javafx-runtime/
 

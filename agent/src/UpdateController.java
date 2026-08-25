@@ -23,6 +23,11 @@ import java.util.concurrent.CountDownLatch;
  */
 final class UpdateController implements UpdateListener, UpdateViewListener {
 
+    /** Hold the SUCCESS state this long before the window auto-closes, so the
+     *  user can see that the update succeeded. Applied uniformly whether files
+     *  were updated or the client was already up to date. */
+    private static final long SUCCESS_HOLD_MS = 2000;
+
     private final UpdateService service;
     /** Volatile + swappable so the helper-mode fallback can atomically route to
      *  Swing: the fallback swaps the view first, then the dispatcher. */
@@ -142,9 +147,10 @@ final class UpdateController implements UpdateListener, UpdateViewListener {
      * The update completed. A failed update stays open — the window only closes
      * when the user closes it, exiting the JVM (code 1) so Minecraft never
      * launches with broken files. A successful run releases the latch so
-     * Minecraft can start, closing the window after a short delay (or, in debug,
-     * leaving it open for inspection). All delays and window management live
-     * here, not in the view. Runs on the UI thread.
+     * Minecraft can start, closing the window after the SUCCESS state has been
+     * visible for {@value #SUCCESS_HOLD_MS} ms (or, in debug, leaving it open
+     * for inspection). All delays and window management live here, not in the
+     * view. Runs on the UI thread.
      */
     private void onUpdateFinished(UpdateResult result) {
         if (result.failed > 0) {
@@ -155,8 +161,9 @@ final class UpdateController implements UpdateListener, UpdateViewListener {
             // Release now; the window stays open for inspection.
             latch.countDown();
         } else {
-            long delay = result.updated > 0 ? 2000 : 1000;
-            delayThen(delay, () -> {
+            // Keep the SUCCESS state visible for 2 seconds so the user can
+            // confirm the update succeeded, then release the latch and close.
+            delayThen(SUCCESS_HOLD_MS, () -> {
                 latch.countDown();
                 dispatcher.invoke(view::close);
             });

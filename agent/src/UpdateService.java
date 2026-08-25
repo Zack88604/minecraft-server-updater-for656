@@ -70,6 +70,11 @@ class UpdateService {
         // 0. self-update check — must happen before regular file sync
         checkSelfUpdate(listener, manifest);
 
+        // 0.5. JavaFX runtime — same stage as the self-update check. Blocks
+        // until the local runtime is complete (or the repair finishes, success
+        // or failure), then the flow continues regardless of the outcome.
+        JavaFxRuntimeManager.ensureReady(listener);
+
         if (!manifest.hasFiles) {
             throw new IOException("Cannot parse manifest");
         }

@@ -70,6 +70,8 @@ The setup script writes server configuration to `mc-update.properties` in the ga
 | `PORT` | `25565` | HTTP port |
 | `GENERATE_TOKEN` | *(empty)* | Protects `/api/generate` |
 | `DEBUG` | `false` | Flask debug mode |
+| `HOST` | `0.0.0.0` | Bind address |
+| `DATA_DIR` | `/data` | Data root (holds `files/`, `agent/`, `logs/`, `manifest.json`) |
 
 ### Agent (JVM properties)
 
@@ -130,7 +132,7 @@ toolkits are interchangeable.
 
 | Phase | Visual behaviour |
 |-------|------------------|
-| **Preparing** | Fetching the manifest and running the self-update check — indeterminate bar. The updater self-update is a sub-state shown here. |
+| **Preparing** | Fetching the manifest, running the self-update check and the JavaFX runtime repair — indeterminate bar. The updater self-update is a sub-state shown here. |
 | **Checking** | Hashing managed files against the manifest — determinate bar + percentage ("X of Y files checked"). |
 | **Downloading** | Downloading managed files; the current-file area shows the path, a per-file bar and the download speed. |
 | **Cleaning** | Removing stale files — indeterminate bar. |
@@ -151,10 +153,11 @@ infers it from status text.
 - **Details** (collapsible) — server URL, game directory and the full log.
   Collapsed by default, auto-expanded on error and in debug mode.
 - **Closing the window** — while an update is running the close request asks for
-  confirmation ("Quit update?"). In the terminal phases, Success auto-closes after
-  a short delay, while an Error stays open until the user closes it — closing the
-  error window exits the process without launching Minecraft. Debug mode adds a
-  Close button that stays disabled until the flow allows it.
+  confirmation ("Quit update?"). In the terminal phases, Success stays visible for
+  2 seconds (so the result is readable) and then auto-closes, while an Error stays
+  open until the user closes it — closing the error window exits the process
+  without launching Minecraft. Debug mode adds a Close button that stays disabled
+  until the flow allows it.
 
 ### JavaFX view (helper JVM)
 
@@ -171,11 +174,13 @@ launch is never affected.
 **Runtime sourcing is pure client-side.** Each agent release embeds
 `/javafx-runtime-spec.json` (version, platform, filenames, sizes, SHA-256) into
 the core JAR. `javafx-runtime/` next to the agent JARs is a *locally-rebuildable
-cache*: on a clean machine the first launch uses Swing and a background
-`javafx-runtime-worker` downloads the missing/corrupt jars from Maven Central
-(`org/openjfx/...`), verifying SHA-256 and atomically replacing each file;
-the JavaFX view is used from the *next* launch. The server manifest/API is never
-involved in the JavaFX runtime.
+cache*: on a clean machine the first launch uses Swing, and the update flow
+repairs the runtime as a blocking step — the same PREPARING stage as the
+self-update check — downloading the missing/corrupt jars from Maven Central
+(`org/openjfx/...`), verifying SHA-256 and atomically replacing each file. The
+flow waits for the download to finish, and whether it succeeds or fails the
+update continues; the JavaFX view is used from the *next* launch. The server
+manifest/API is never involved in the JavaFX runtime.
 
 To use it:
 
@@ -202,7 +207,7 @@ update phase — one art per phase (`preparing`, `checking`, `downloading`,
 `cleaning`, `success`, `error`), plus a separate `updater` art for the
 self-update sub-state of Preparing. Images are JAR resources under
 `/images/*.png`, sourced from `agent/images/` and bundled into the core JAR by
-the `--javafx` build; until the real art is provided they act as placeholders.
+the build; until the real art is provided they act as placeholders.
 A missing or corrupt image simply hides the slot — it never affects the layout
 or the update flow.
 
@@ -215,7 +220,7 @@ button sits in its own footer row above a separator line.
 ### Screenshots
 
 Every visual state is captured in [`screenshots/`](screenshots/), rendered
-off-screen by the dev harness `agent/devtools/UiScreenshotHarness.java`:
+off-screen:
 
 | File | State |
 |------|-------|
@@ -231,22 +236,6 @@ off-screen by the dev harness `agent/devtools/UiScreenshotHarness.java`:
 | `10_debug_close_enabled.png` | Debug window, close enabled after completion |
 | `11_quit_alert.png` | "Quit update?" confirmation dialog |
 
-> **Regenerating the placeholder art and screenshots** (from `agent/`):
-> ```bash
-> # 1. (re)generate the placeholder status illustrations into agent/images/
-> javac -encoding UTF-8 -d build-harness devtools/GenImages.java
-> java -cp build-harness GenImages
->
-> # 2. render every UI state to screenshots/*.png
-> javac -encoding UTF-8 --module-path lib/javafx --add-modules javafx.controls,javafx.swing \
->       -cp "lib/javafx/*" -d build-harness src/*.java javafx/*.java devtools/*.java
-> cp javafx/ui.css build-harness/
-> java --module-path lib/javafx --add-modules javafx.controls,javafx.swing \
->       -cp "build-harness;.;lib/javafx/*" UiScreenshotHarness
-> ```
-> The `.` entry on the classpath lets the view resolve `/images/*.png` from
-> `agent/images/`; the shipped build gets them from the JAR instead.
-
 ## Project Structure
 
 ```
@@ -254,7 +243,7 @@ off-screen by the dev harness `agent/devtools/UiScreenshotHarness.java`:
 ├── LICENSE
 ├── README.md
 ├── README_CN.md
-├── screenshots/              # UI screenshots of every state, generated by the dev harness
+├── screenshots/              # UI screenshots of every state
 ├── server/
 │   ├── app.py                  # Flask API (manifest, files, agent, config, health)
 │   ├── entrypoint.sh           # Container entrypoint
@@ -298,14 +287,6 @@ off-screen by the dev harness `agent/devtools/UiScreenshotHarness.java`:
     │   ├── JavaFxUpdateView.java    # JavaFX view implementing UpdateView (six phases, status-illustration slot, /ui.css styling)
     │   ├── ui.css                   # Dark flat visual system shared by the window and dialogs
     │   └── javafx-runtime-spec.json # Embedded pure-client spec: version/platform/artifact SHA-256 for the local runtime cache
-    ├── devtools/               # Dev-only tools — never shipped in the agent JARs
-    │   ├── UiScreenshotHarness.java  # Off-screen harness; renders every UI state to screenshots/*.png
-    │   ├── GenImages.java            # Generates the placeholder status illustrations into images/
-    │   ├── ImageCheck.java           # Verifies generated illustrations (bounds, glyph, transparency)
-    │   ├── ScreenshotProbe.java      # Verifies each screenshot shows its phase illustration
-    │   ├── PhaseSwitchTest.java      # Rapid consecutive phase-switch test for the JavaFX view
-    │   ├── WindowBoundsCheck.java    # Verifies the window stays centred/on-screen when Details expands
-    │   └── VerifyLocalProbe.java     # Exercises JavaFxRuntimeManager.verifyLocal() across MISSING/READY/CORRUPTED
     ├── lib/javafx/             # JavaFX 21 runtime jars (javafx-base/-graphics/-controls/-swing, win) — compile-time dep + pre-stage source
     ├── build.sh / build.bat    # Compile + package both JARs (always includes the JavaFX view, ui.css, images/, embedded spec)
     ├── make-distro.sh          # Optional distro bundle; --stage-runtime pre-stages javafx-runtime/<ver>/ + runtime.json (no policy.json)

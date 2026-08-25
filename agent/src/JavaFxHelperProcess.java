@@ -37,6 +37,13 @@ final class JavaFxHelperProcess {
     private static final long READY_TIMEOUT_SECONDS = 10;
     private static final long EXIT_BACKSTOP_SECONDS = 3;
 
+    /** Post-ready stall detection: if the outbox stays full this long (the
+     *  writer is blocked on a full pipe because the helper stopped draining
+     *  stdin), the helper has hung — destroy it and fall back. Idle-safe: a
+     *  healthy helper keeps the queue near-empty, so the counter resets. */
+    private static final long STALL_SAMPLE_MS = 1000;
+    private static final int STALL_FULL_SAMPLES = 5;
+
     private final Process process;
     private final ArrayBlockingQueue<String> outbox;
     private final RemoteUpdateView view;
@@ -134,8 +141,20 @@ final class JavaFxHelperProcess {
                 while ((line = r.readLine()) != null) {
                     handleProtocolLine(line, controller);
                 }
-            } catch (IOException ignored) {
-                // pipe broken when the process dies
+                // EOF on the protocol channel means the helper is gone even if
+                // the process somehow hasn't exited — engage the fallback
+                // directly rather than waiting for onExit (isolation req: a
+                // broken IPC pipe must only log + fall back).
+                if (!intentionalExit.get()) {
+                    System.err.println("[javafx] Helper stdout closed unexpectedly — engaging Swing fallback.");
+                    view.engageSwingFallback();
+                }
+            } catch (IOException e) {
+                if (!intentionalExit.get()) {
+                    System.err.println("[javafx] Helper stdout read error: " + e
+                            + " — engaging Swing fallback.");
+                    view.engageSwingFallback();
+                }
             }
         }, "javafx-helper-stdout");
         stdout.setDaemon(true);
@@ -151,7 +170,10 @@ final class JavaFxHelperProcess {
                     snapshot.onLog("[helper] " + line);
                     System.err.println("[helper] " + line);
                 }
-            } catch (IOException ignored) {
+            } catch (IOException e) {
+                // Routine when the process exits — stderr is a debug drain, not
+                // the IPC channel, so this never triggers a fallback.
+                System.err.println("[javafx] Helper stderr closed: " + e);
             }
         }, "javafx-helper-stderr");
         stderr.setDaemon(true);
@@ -172,6 +194,9 @@ final class JavaFxHelperProcess {
             // The new-version helper confirmed it works — safe to delete the
             // previous version left behind by an upgrade.
             JavaFxRuntimeManager.cleanupOldVersion();
+            // The helper is alive and responsive; start watching for a later
+            // hang (post-ready stall) that the ready watchdog can no longer see.
+            startStallMonitor();
         } else if ("windowClosed".equals(type)) {
             controller.onWindowClosed();
             sendExit();
@@ -197,6 +222,48 @@ final class JavaFxHelperProcess {
         t.start();
     }
 
+    /**
+     * Post-ready liveness watchdog. Once the helper has sent {@code ready}, the
+     * ready watchdog is spent, so a helper that hangs later (deadlocked FX
+     * thread, stopped draining stdin) would freeze the window forever. The
+     * writer thread drains the outbox every 200ms; when the helper stops reading
+     * stdin the OS pipe fills and the writer blocks inside flush, so the outbox
+     * stays full. If it is still full after {@link #STALL_FULL_SAMPLES} 1s
+     * samples, the helper is unambiguously stalled — destroy it and fall back.
+     * Never fires on idle: with nothing to send the queue is empty, so the full
+     * counter resets every sample.
+     */
+    private void startStallMonitor() {
+        Thread t = new Thread(() -> {
+            int full = 0;
+            while (!intentionalExit.get() && process.isAlive()) {
+                try {
+                    Thread.sleep(STALL_SAMPLE_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                if (intentionalExit.get() || !process.isAlive()) {
+                    return;
+                }
+                if (outbox.size() >= OUTBOX_CAPACITY) {
+                    if (++full >= STALL_FULL_SAMPLES) {
+                        System.err.println("[javafx] Helper stalled (outbox full ~"
+                                + (STALL_FULL_SAMPLES * STALL_SAMPLE_MS / 1000)
+                                + "s) — engaging Swing fallback.");
+                        process.destroy();
+                        view.engageSwingFallback();
+                        return;
+                    }
+                } else {
+                    full = 0;
+                }
+            }
+        }, "javafx-helper-stall-monitor");
+        t.setDaemon(true);
+        t.start();
+    }
+
     private void writeLoop() {
         try (BufferedWriter w = new BufferedWriter(
                 new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8))) {
@@ -212,7 +279,14 @@ final class JavaFxHelperProcess {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (IOException e) {
-            // process gone — nothing left to write
+            // Broken pipe when the process dies (or the stall monitor destroys a
+            // helper stuck on a full pipe) — a failed write is an IPC failure,
+            // so log and engage the fallback. Idempotent with onExit.
+            if (!intentionalExit.get()) {
+                System.err.println("[javafx] Helper write failed: " + e
+                        + " — engaging Swing fallback.");
+                view.engageSwingFallback();
+            }
         }
     }
 

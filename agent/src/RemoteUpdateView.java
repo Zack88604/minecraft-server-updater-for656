@@ -176,15 +176,36 @@ final class RemoteUpdateView implements UpdateView, UpdateViewListener {
             return; // flow already finished — nothing to rebuild
         }
         SwingUtilities.invokeLater(() -> {
-            UpdateGUI swing = new UpdateGUI(controller, model);
-            swingTarget = swing;                    // route late renders here first
-            controller.attach(swing);               // swap the view
-            controller.setDispatcher(new SwingUiDispatcher()); // swap the dispatcher
-            frozen.applyTo(swing);                  // full state replay
-            for (Runnable r : toDrain) {
-                r.run();                            // in-flight renders since the freeze
+            try {
+                UpdateGUI swing = new UpdateGUI(controller, model);
+                swingTarget = swing;                // route late renders here first
+                controller.attach(swing);           // swap the view
+                controller.setDispatcher(new SwingUiDispatcher()); // swap the dispatcher
+                frozen.applyTo(swing);              // full state replay
+                for (Runnable r : toDrain) {
+                    r.run();                        // in-flight renders since the freeze
+                }
+                // Drain anything queued between the freeze and swingTarget being
+                // set (the EDT-install gap) so no render is stranded in pending.
+                while (true) {
+                    Runnable next;
+                    synchronized (lock) {
+                        if (pending.isEmpty()) {
+                            break;
+                        }
+                        next = pending.remove(0);
+                    }
+                    next.run();
+                }
+                swing.open();
+            } catch (Throwable t) {
+                // A failed fallback install must not take down the update flow:
+                // log only, keep the controller running. Events keep buffering
+                // into `pending` and are never routed to a half-built window.
+                swingTarget = null;
+                System.err.println("[swing] Fallback install failed: " + t);
+                t.printStackTrace();
             }
-            swing.open();
         });
     }
 

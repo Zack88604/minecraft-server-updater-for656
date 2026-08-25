@@ -52,7 +52,7 @@ fi
 echo "[build] Compiling core + JavaFX helper view..."
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
-javac -encoding UTF-8 -cp "lib/javafx/*" -d "$BUILD_DIR" "$SRC_DIR"/*.java "$JAVAFX_SRC_DIR"/*.java
+javac --release 17 -encoding UTF-8 -cp "lib/javafx/*" -d "$BUILD_DIR" "$SRC_DIR"/*.java "$JAVAFX_SRC_DIR"/*.java
 # Bundle the stylesheet + illustrations so the helper view can load them.
 cp "$JAVAFX_SRC_DIR/ui.css" "$BUILD_DIR/ui.css"
 cp -r "$SCRIPT_DIR/images" "$BUILD_DIR/images"
@@ -69,6 +69,7 @@ jar cf "$CORE_JAR" \
     ui.css images javafx-runtime-spec.json
 
 cd "$SCRIPT_DIR"
+
 rm -rf "$BUILD_DIR"
 
 echo "[build] Done!"
