@@ -1,105 +1,457 @@
 # GUI Adapter API
 
 The updater exposes a stable, toolkit-neutral GUI boundary in
-`com.zack88604.autoupdater.gui.api`. GUI code receives immutable display state
-and sends only close-related user intent back to the application controller.
+`com.zack88604.autoupdater.gui.api`. You can build your own GUI with Swing, JavaFX,
+or any other toolkit **without touching the update logic, file synchronization, or
+lifecycle control** (who releases the Minecraft launch latch and when the JVM exits).
 
-## Implement a factory
+This guide has four parts:
 
-Implement `GuiAdapterFactory` for the GUI toolkit you want to use.
+1. [How the updater drives a GUI](#1-how-the-updater-drives-a-gui)
+2. [Tutorial: build your own GUI](#2-tutorial-build-your-own-gui-in-5-steps)
+3. [Registering your adapter](#3-registering-your-adapter)
+4. [API reference](#4-api-reference)
+
+> A working reference implementation lives in `com.zack88604.autoupdater.gui.swing`
+> (the built-in Swing adapter). Mirror it for your own toolkit.
+
+---
+
+## 1. How the updater drives a GUI
+
+### 1.1 Runtime flow
+
+```mermaid
+sequenceDiagram
+    participant MC as Minecraft (launcher)
+    participant B as AgentBootstrap
+    participant C as UpdateController
+    participant S as UpdateService (worker thread)
+    participant A as Your GuiAdapter
+    participant V as Your UpdateView
+
+    MC->>B: premain(args, inst)
+    B->>B: resolve config, pick adapter
+    B->>C: new UpdateController(service, adapter, latch)
+    C->>A: dispatcher.dispatch { create view }
+    A->>V: create(actions) → new view
+    C->>V: open()
+    C->>V: render(initial state)
+    C->>S: run in worker thread
+    loop every business event
+        S-->>C: onUpdateEvent(event)
+        C->>C: reduce(event) → new UpdateUiState
+        C->>A: dispatcher.dispatch { render(state) }
+        A->>V: render(state)
+    end
+    S-->>C: Completed / Failed
+    C->>V: render(final state)
+    C->>C: delay → countDown(latch) + close()  (on success)
+    Note over MC: latch released → Minecraft starts
+```
+
+### 1.2 Threading model
+
+| Thread | What runs there |
+|--------|-----------------|
+| **Update worker** | `UpdateService.run(...)` — HTTP, hashing, downloads, cleanup. Emits `UpdateEvent`s. |
+| **Controller** | Folds each event into an immutable `UpdateUiState`, then schedules one render. |
+| **Your UI thread** | Everything `UpdateView` — reached through `GuiAdapter.dispatcher()`. |
+
+- The update core **never** imports `javax.swing`, `javafx`, or AWT.
+- Every `UpdateView` call (`open`, `render`, `close`) arrives on **your** UI thread
+  through `UiDispatcher`.
+- Your adapter only ever receives immutable display state and forwards close intent
+  back — keep it away from network, file, or process work.
+
+### 1.3 Who owns what
+
+| Concern | Owner |
+|---------|-------|
+| Update business flow (manifest, hashing, downloads, cleanup) | `UpdateService` |
+| Event → snapshot reduction | `UpdateStateReducer` (called by the controller) |
+| Rendering, user-facing copy, confirm dialogs | Your `UpdateView` |
+| UI-thread marshalling | Your `GuiAdapter` / `UiDispatcher` |
+| **Launch latch & `System.exit`** | `UpdateController` — nothing to do with your preset |
+
+---
+
+## 2. Tutorial: build your own GUI in 5 steps
+
+The tutorial shows how to implement a custom GUI you can apply to any toolkit
+(using Swing as the example).
+
+### Step 1 — Dependencies and project layout
+
+- Compile against `UpdateAgent_core.jar` as a **provided** dependency — do not
+  bundle the updater API or core classes into your GUI jar.
+- The GUI API lives in package `com.zack88604.autoupdater.gui.api`.
+
+```text
+my-gui/
+  src/
+    com/example/updategui/
+      MyGuiAdapterFactory.java
+      MyGuiAdapter.java
+      MyGuiView.java
+```
+
+### Step 2 — Implement the factory
 
 ```java
+package com.example.updategui;
+
+import com.zack88604.autoupdater.gui.api.GuiAdapter;
+import com.zack88604.autoupdater.gui.api.GuiAdapterContext;
+import com.zack88604.autoupdater.gui.api.GuiAdapterFactory;
+
+/** Must be public with a public no-arg constructor. */
 public final class MyGuiAdapterFactory implements GuiAdapterFactory {
+
     @Override
     public GuiAdapter create(GuiAdapterContext context) {
-        return new MyGuiAdapter(context);
+        return new MyGuiAdapter(context.getGameDirectory(), context.isDebug());
     }
 }
 ```
 
-The factory class must be public and have a public no-argument constructor.
+### Step 3 — Implement the adapter + dispatcher
 
-## Select it
+The adapter supplies the UI-thread bridge and creates your view.
 
-Compile the factory and its adapter into `UpdateAgent_core.jar` alongside the
-agent source, then configure its fully qualified class name.
+```java
+package com.example.updategui;
+
+import com.zack88604.autoupdater.gui.api.*;
+
+public final class MyGuiAdapter implements GuiAdapter {
+
+    private final String gameDirectory;
+    private final boolean debug;
+
+    public MyGuiAdapter(String gameDirectory, boolean debug) {
+        this.gameDirectory = gameDirectory;
+        this.debug = debug;
+    }
+
+    @Override
+    public UiDispatcher dispatcher() {
+        // Example for Swing; for JavaFX use Platform::runLater.
+        return SwingUtilities::invokeLater;
+    }
+
+    @Override
+    public UpdateView create(UpdateViewActions actions) {
+        return new MyGuiView(actions, gameDirectory, debug);
+    }
+}
+```
+
+### Step 4 — Implement the view
+
+```java
+package com.example.updategui;
+
+import javax.swing.*;
+import com.zack88604.autoupdater.gui.api.*;
+
+public final class MyGuiView implements UpdateView {
+
+    private final UpdateViewActions actions;
+    private final JFrame frame = new JFrame("Minecraft Updater");
+    private final JLabel status = new JLabel();
+    private final JProgressBar progress = new JProgressBar();
+
+    public MyGuiView(UpdateViewActions actions, String gameDir, boolean debug) {
+        this.actions = actions;
+        // ... assemble the window ...
+        progress.setStringPainted(true);
+
+        // Report user intent back to the controller:
+        frame.addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override public void windowClosing(java.awt.event.WindowEvent e) {
+                actions.requestClose();            // user asked to close
+            }
+            @Override public void windowClosed(java.awt.event.WindowEvent e) {
+                actions.notifyWindowClosed();      // native window really closed
+            }
+        });
+    }
+
+    @Override
+    public void open() {
+        frame.setVisible(true);
+    }
+
+    @Override
+    public void render(UpdateUiState state) {
+        // `state` is a complete snapshot — render it whole.
+        status.setText(state.getStatus());
+        if (state.isOverallProgressIndeterminate()) {
+            progress.setIndeterminate(true);
+        } else {
+            progress.setIndeterminate(false);
+            progress.setValue(state.getOverallProgressPercent());
+        }
+        // Also available: state.getPhase(), state.getLogLines(),
+        // state.getDownloadProgress(), state.getSummary(), ...
+    }
+
+    @Override
+    public void close() {
+        frame.dispose();
+    }
+}
+```
+
+Key points:
+
+- `render(state)` hands you the **entire** new state — don't infer business
+  conditions from previously rendered strings or keep mutable updater state in
+  the view.
+- `open` / `render` / `close` all run on your UI thread as long as you return a
+  working `UiDispatcher`.
+
+### Step 5 — Handle close correctly
+
+Your view never decides outcomes; it only reports **intent** through
+`UpdateViewActions`:
+
+| Method | When to call |
+|--------|--------------|
+| `requestClose()` | The user asked to close (clicked ✕ or a Cancel button). |
+| `notifyWindowClosed()` | The native window has actually finished closing. |
+
+The controller applies the current **close policy** from the state:
+
+| `ClosePolicy` | When | What a close does |
+|---------------|------|-------------------|
+| `CONFIRM` | Update in progress | Show a toolkit-specific confirmation dialog first. If confirmed, `requestClose()` releases the latch (Minecraft continues) and closes the view. |
+| `ALLOW` | Update succeeded | Closing is allowed; the latch is released and the window closes. |
+| `EXIT_FAILURE` | Update failed | Any close (requested or native) calls `System.exit(1)` — **Minecraft will not start**. |
+
+> Never release the latch or call `System.exit` yourself. The controller owns both.
+
+---
+
+## 3. Registering your adapter
+
+### 3.1 Method A — compile into the core, select by property
+
+Compile your factory and adapter **into `UpdateAgent_core.jar`** together with the
+agent sources, then configure the fully-qualified factory class name. It can be
+supplied through any config source (first source wins in normal mode; `admin=true`
+reverses the order):
+
+| Source | Example |
+|--------|---------|
+| `mc-update.properties` in the game dir | `gui-adapter=com.example.updategui.MyGuiAdapterFactory` |
+| Inline agent argument | `-javaagent:UpdateAgent.jar=gui-adapter=com.example.updategui.MyGuiAdapterFactory` |
+| System property | `-D mc-update.gui-adapter=com.example.updategui.MyGuiAdapterFactory` |
+
+When no factory is configured, the built-in Swing adapter is used.
+
+### 3.2 Method B — external GUI preset (no agent rebuild)
+
+If `gui-adapter` is **not** configured, the updater scans a fixed location under the
+Minecraft directory:
+
+```text
+<game-dir>/
+  .mc-update/                       # updater-owned
+    gui-selection.properties        # saved default (managed by the updater)
+    gui-presets/
+      my-gui.jar                    # your packaged preset
+```
+
+`mc-update.properties` stays in the game root — it does not decide the preset selection.
+
+#### Preset archive format
+
+A selectable preset JAR must contain this metadata file:
 
 ```properties
-gui-adapter=com.example.updategui.MyGuiAdapterFactory
-```
-
-The same value can be supplied as `mc-update.gui-adapter` or with inline agent
-arguments.
-
-```
--javaagent:UpdateAgent.jar=gui-adapter=com.example.updategui.MyGuiAdapterFactory
-```
-
-When no factory is configured, the built-in Swing adapter remains the default.
-
-## External GUI presets
-
-When no explicit gui-adapter is configured, the updater uses this fixed location
-under the configured Minecraft directory:
-
-~~~text
-.mc-update/
-  gui-selection.properties    # managed by the updater
-  gui-presets/
-    my-gui.jar
-~~~
-
-mc-update.properties remains in the game root and is not moved. On the first
-launch without a saved choice, the updater scans the gui-presets directory. If
-it finds a selectable JAR, a trusted Swing dialog lets the user choose that
-preset or the built-in Swing GUI. The checkbox saves the selection as the
-default for future launches.
-
-A saved Swing choice starts directly. A saved external preset always shows a
-risk confirmation before its JAR is loaded. If the user declines, the JAR fails
-to load, or its metadata disappears, the updater falls back to Swing. Delete
-the gui-selection.properties file to show the chooser again.
-
-### Preset archive contract
-
-A selectable JAR must contain this metadata file:
-
-~~~properties
 # META-INF/mc-update-gui.properties
 name=Example GUI
 version=1.0.0
 factory-class=com.example.updategui.MyGuiAdapterFactory
-~~~
+```
 
-The factory class must be public, have a public no-argument constructor, and
-implement GuiAdapterFactory. Compile against UpdateAgent_core.jar as a provided
-dependency; do not bundle updater API or core classes inside the preset.
+- `factory-class` is required; `name` / `version` are shown in the chooser.
+- The factory class must be `public`, have a `public` no-arg constructor, and
+  implement `GuiAdapterFactory`.
+- Build against `UpdateAgent_core.jar` as a **provided** dependency; do not bundle
+  the updater API or core classes inside the preset.
 
-Discovery reads only this metadata and does not load preset classes. The class
-is loaded only after the user confirms the warning. External JARs execute code
-in the game process and may read or modify files, access the network, or affect
-the game. Install only files from a trusted source.
+Example packaging (from your build output directory):
 
-GuiAdapterContext provides both the game root and the fixed updater
-configuration directory for presentation resources.
+```bash
+jar cf my-gui.jar -C classes . -C meta META-INF
+# where meta/META-INF/mc-update-gui.properties contains the metadata above
+```
 
-## Adapter rules
+#### Selection & fallback behavior
 
-- Implement `GuiAdapter`, `UiDispatcher`, and `UpdateView`; use
+1. **First launch** (no saved choice): a trusted built-in Swing dialog lets the user
+   pick an external preset or the built-in Swing GUI. A checkbox ("remember") saves
+   the choice to `gui-selection.properties`.
+2. **Saved Swing choice** → starts directly.
+3. **Saved external preset** → every launch shows a **risk confirmation** before the
+   preset JAR is loaded.
+4. **Fallback**: if the user declines, the JAR fails to load, or the preset metadata
+   disappears → the updater falls back to built-in Swing (a failed load also clears
+   the saved selection).
+5. Delete `gui-selection.properties` → the chooser appears again.
+
+#### Security
+
+- Classes are loaded **only after** the user confirms the warning.
+- An external preset executes code **inside the game process**: it may read or modify
+  files, access the network, or affect the game. Install only JARs from a trusted source.
+
+---
+
+## 4. API reference
+
+All types live in `com.zack88604.autoupdater.gui.api`.
+
+### 4.1 `GuiAdapterFactory` (interface)
+
+```java
+GuiAdapter create(GuiAdapterContext context);
+```
+
+Creates one adapter per launch. Must be `public` with a `public` no-arg constructor
+when selected by class name or from a preset.
+
+### 4.2 `GuiAdapter` (interface)
+
+```java
+UiDispatcher dispatcher();
+UpdateView   create(UpdateViewActions actions);
+```
+
+- `dispatcher()` — the bridge to your UI thread (e.g. `SwingUtilities::invokeLater`).
+- `create(actions)` — build a new, **not-yet-opened** `UpdateView` bound to the
+  controller's action callbacks. Called on your UI thread.
+
+### 4.3 `UiDispatcher` (interface, `@FunctionalInterface`)
+
+```java
+void dispatch(Runnable task);
+```
+
+Schedules a task on your toolkit's UI thread.
+
+### 4.4 `UpdateView` (interface)
+
+```java
+void open();                   // show the window (once, before the first render)
+void render(UpdateUiState s);  // render a complete replacement snapshot
+void close();                  // the controller decided to close the window
+```
+
+All three are invoked on your UI thread through your dispatcher.
+
+### 4.5 `UpdateViewActions` (interface)
+
+```java
+void requestClose();       // the user asked to close the window
+void notifyWindowClosed(); // the native window finished closing
+```
+
+Implemented by the controller — see [Step 5](#step-5--handle-close-correctly).
+
+### 4.6 `ClosePolicy` (enum)
+
+`CONFIRM` · `ALLOW` · `EXIT_FAILURE` — see the table in [Step 5](#step-5--handle-close-correctly).
+
+### 4.7 `GuiAdapterContext` (immutable)
+
+| Method | Meaning |
+|--------|---------|
+| `String getGameDirectory()` | Configured Minecraft root — for presentation resources. |
+| `String getUpdaterConfigurationDirectory()` | Updater-owned config dir (`<gameDir>/.mc-update`). |
+| `boolean isDebug()` | Keep a successful view open for inspection (`mc-update.debug`). |
+
+Presentation settings only — no services, no mutable config, no process control.
+
+### 4.8 `UpdateUiState` (immutable, complete snapshot)
+
+| Field | Method | Meaning |
+|-------|--------|---------|
+| `UpdatePhase` | `getPhase()` | Current stage (see 4.9). |
+| `String` | `getStatus()` | Headline text, e.g. "Downloading: mods/x.jar". |
+| `String` | `getDescription()` | Secondary text (may be empty). |
+| `List<String>` | `getLogLines()` | Chronological log snapshot. |
+| `List<String>` | `getServerUrls()` | Configured servers in priority order. |
+| `String` | `getCurrentServer()` | Active server (`null` before selection). |
+| `int` | `getOverallProgressPercent()` | Overall progress 0–100. |
+| `boolean` | `isOverallProgressIndeterminate()` | Show an indeterminate bar. |
+| `DownloadProgress` | `getDownloadProgress()` | Current download (or inactive). |
+| `ClosePolicy` | `getClosePolicy()` | How a close request is treated. |
+| `UpdateSummary` | `getSummary()` | Terminal result; `null` while running. |
+| `String` | `getErrorMessage()` | Display-safe failure text; `null` when none. |
+
+Build helpers: `UpdateUiState.initial()`, `UpdateUiState.builder()`. Render **the
+whole object** in `render(...)`; treat it as immutable, never retain it after the
+call returns.
+
+### 4.9 `UpdatePhase` (enum)
+
+| Phase | Meaning |
+|-------|---------|
+| `PREPARING` | Fetching the manifest, checking agent self-update. |
+| `CHECKING` | Hashing local files against the manifest. |
+| `DOWNLOADING` | Downloading a managed resource file. |
+| `CLEANING` | Removing stale managed files. |
+| `SUCCESS` | Completed with no failed files. |
+| `ERROR` | Failed, or completed with failed files. |
+
+### 4.10 `DownloadProgress` (immutable)
+
+```java
+DownloadProgress.inactive();
+DownloadProgress.active(String path, Kind kind, long downloadedBytes,
+                        long totalBytes, double bytesPerSecond);
+```
+
+| Method | Meaning |
+|--------|---------|
+| `isActive()` | Is a download running right now? |
+| `getPath()` / `getKind()` | What is being downloaded. |
+| `getDownloadedBytes()` / `getTotalBytes()` | Progress (`totalBytes` may be `0` = unknown). |
+| `getBytesPerSecond()` | Current transfer rate. |
+
+`Kind`: `FILE` (managed resource), `UPDATER` (new `UpdateAgent_core.jar`),
+`GUI_RUNTIME` (reserved for GUI runtime artifacts).
+
+### 4.11 `UpdateSummary` (immutable)
+
+| Method | Meaning |
+|--------|---------|
+| `getUpdatedFiles()` / `getFailedFiles()` | Terminal file counts. |
+| `isSuccessful()` | `failedFiles == 0`. |
+
+---
+
+## 5. Rules & common pitfalls
+
+- **Do** implement exactly `GuiAdapter`, `UiDispatcher`, `UpdateView`; use
   `GuiAdapterContext` only for presentation settings.
-- The controller invokes every `UpdateView` method through the adapter's UI
-  dispatcher.
-- `render(UpdateUiState)` receives a complete replacement snapshot. Do not
-  infer business state from prior strings or retain mutable updater state.
-- The view must call `UpdateViewActions` for close requests and native-window
-  closure. It must not release the launch latch or terminate the JVM itself.
-- Do not access updater HTTP, file, or process code from the adapter.
+- **Do** make every `UpdateView` call run on the UI thread via your `UiDispatcher`.
+- **Do** treat `render(state)` input as a complete replacement snapshot.
+- **Don't** infer business state from previously rendered strings.
+- **Don't** keep mutable updater state in the view.
+- **Don't** call `UpdateViewActions` for anything except close intent / native close.
+- **Don't** release the launch latch, call `System.exit`, or access updater
+  HTTP / file / process code from the adapter.
 
-## Public model
+## 6. Testing your adapter
 
-The render state is composed from these immutable API types:
-
-- UpdateUiState: phase, message, server, progress, result, and error.
-- DownloadProgress: current resource and transfer metrics.
-- ClosePolicy: confirmation, successful close, and failure-exit behavior.
-- UpdateViewActions: close intent and native-window close notification.
+1. Start a server and generate a manifest (see the README Quick Start).
+2. Point a game directory at it and select your adapter.
+3. Set `mc-update.debug=true` to keep the window open on success for inspection.
+4. Touch a managed file to exercise `DOWNLOADING`; remove a manifest entry to
+   exercise `CLEANING`; stop the server mid-flight to exercise failover and failure
+   paths (confirm `EXIT_FAILURE` exits the JVM on close).
