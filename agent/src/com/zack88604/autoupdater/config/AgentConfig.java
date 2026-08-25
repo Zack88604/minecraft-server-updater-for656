@@ -21,6 +21,7 @@ public final class AgentConfig {
     public static final String PROP_SERVER = "mc-update.server";
     public static final String PROP_GAME_DIR = "mc-update.game-dir";
     public static final String PROP_DEBUG = "mc-update.debug";
+    public static final String PROP_GUI_ADAPTER = "mc-update.gui-adapter";
 
     private static final String CONFIG_FILE = "mc-update.properties";
     public static final String DEFAULT_SERVER = "http://localhost:25565";
@@ -29,12 +30,15 @@ public final class AgentConfig {
     private final String server;
     private final boolean debug;
     private final boolean admin;
+    private final String guiAdapterFactoryClassName;
 
-    private AgentConfig(String gameDir, String server, boolean debug, boolean admin) {
+    private AgentConfig(String gameDir, String server, boolean debug, boolean admin,
+                        String guiAdapterFactoryClassName) {
         this.gameDir = gameDir;
         this.server = server;
         this.debug = debug;
         this.admin = admin;
+        this.guiAdapterFactoryClassName = guiAdapterFactoryClassName;
     }
 
     /** Resolve configuration from the current JVM and the agent argument string. */
@@ -68,6 +72,7 @@ public final class AgentConfig {
 
         String server;
         String debugValue;
+        String guiAdapterFactory;
         if (admin) {
             server = coalesce(
                     arguments.get("server"),
@@ -80,6 +85,11 @@ public final class AgentConfig {
                     system.getProperty(PROP_DEBUG),
                     fileConfig.getProperty("debug"),
                     "false"
+            );
+            guiAdapterFactory = coalesce(
+                    arguments.get("gui-adapter"),
+                    system.getProperty(PROP_GUI_ADAPTER),
+                    fileConfig.getProperty("gui-adapter")
             );
         } else {
             server = coalesce(
@@ -94,9 +104,15 @@ public final class AgentConfig {
                     system.getProperty(PROP_DEBUG),
                     "false"
             );
+            guiAdapterFactory = coalesce(
+                    fileConfig.getProperty("gui-adapter"),
+                    arguments.get("gui-adapter"),
+                    system.getProperty(PROP_GUI_ADAPTER)
+            );
         }
 
-        return new AgentConfig(gameDir, server, isTrue(debugValue), admin);
+        return new AgentConfig(gameDir, server, isTrue(debugValue), admin,
+                guiAdapterFactory);
     }
 
     public String getGameDir() {
@@ -113,6 +129,14 @@ public final class AgentConfig {
 
     public boolean isDebug() {
         return debug;
+    }
+
+    /**
+     * Return a configured {@code GuiAdapterFactory} class name, or {@code null}
+     * when the built-in Swing adapter should be used.
+     */
+    public String getGuiAdapterFactoryClassName() {
+        return guiAdapterFactoryClassName;
     }
 
     public boolean isAdmin() {

@@ -61,6 +61,11 @@ cd agent
 | `/api/generate` | POST | 重新生成清单（Token 保护） |
 | `/api/health` | GET | 健康检查 |
 
+## GUI Adapter 开发
+
+GUI 开发者可以在不修改更新逻辑与生命周期控制的情况下接入其他工具包。
+内建 Swing adapter 仍为默认实现；自定义 adapter 的实现与配置方式见 [GUI Adapter API 中文说明](GUI_ADAPTER_API_CN.md)。
+
 ## 配置
 
 ### 服务端（环境变量）
@@ -85,6 +90,7 @@ cd agent
 | `mc-update.server` | `http://localhost:25565` | 服务器地址 — 支持**逗号分隔多源**，自动故障转移 |
 | `mc-update.game-dir` | `.` | Minecraft 目录 |
 | `mc-update.debug` | `false` | 同步完成后保持窗口打开 |
+| `mc-update.gui-adapter` | *（内建 Swing）* | `GuiAdapterFactory` 的完整类名 |
 
 **推荐方式：`mc-update.properties`**（由安装脚本写入）：
 ```properties

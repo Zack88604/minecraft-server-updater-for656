@@ -61,6 +61,11 @@ The setup script writes server configuration to `mc-update.properties` in the ga
 | `/api/generate` | POST | Regenerate manifest (token-protected) |
 | `/api/health` | GET | Health check |
 
+## GUI Adapter Development
+
+GUI developers can add another toolkit without changing update logic or lifecycle control.
+The built-in Swing adapter remains the default; see [GUI Adapter API](GUI_ADAPTER_API.md) to implement and select a custom adapter.
+
 ## Configuration
 
 ### Server (env vars)
@@ -85,6 +90,7 @@ Configuration is resolved in this order (normal mode):
 | `mc-update.server` | `http://localhost:25565` | Server URL(s) — comma-separated for **multi-source fallback** |
 | `mc-update.game-dir` | `.` | Minecraft directory |
 | `mc-update.debug` | `false` | Keep GUI open after sync |
+| `mc-update.gui-adapter` | *(built-in Swing)* | Fully qualified `GuiAdapterFactory` class |
 
 **Recommended: `mc-update.properties`** (written by setup script):
 ```properties
