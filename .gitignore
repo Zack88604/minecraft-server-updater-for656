@@ -1,0 +1,14 @@
+# Build outputs
+agent/UpdateAgent.jar
+agent/UpdateAgent_core.jar
+agent/build/
+agent/build-harness/
+agent/distro/
+
+# Local JavaFX runtime cache (rebuilt from Maven Central via the embedded spec)
+agent/javafx-runtime/
+
+# JavaFX build-time jars (auto-downloaded from Maven Central by build.bat/build.sh)
+agent/lib/
+
+
