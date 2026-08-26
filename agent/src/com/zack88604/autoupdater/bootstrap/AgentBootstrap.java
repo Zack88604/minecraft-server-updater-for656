@@ -6,10 +6,13 @@ import com.zack88604.autoupdater.config.AgentConfig;
 import com.zack88604.autoupdater.gui.api.GuiAdapter;
 import com.zack88604.autoupdater.gui.api.GuiAdapterContext;
 import com.zack88604.autoupdater.gui.api.GuiAdapterFactory;
+import com.zack88604.autoupdater.gui.api.JavaHelperGuiPresetFactory;
+import com.zack88604.autoupdater.gui.api.JavaHelperLaunchSpec;
 import com.zack88604.autoupdater.gui.preset.ExternalGuiAdapterFactoryLoader;
 import com.zack88604.autoupdater.gui.preset.GuiPreset;
 import com.zack88604.autoupdater.gui.preset.GuiPresetSelection;
 import com.zack88604.autoupdater.gui.preset.GuiPresetStore;
+import com.zack88604.autoupdater.gui.preset.JavaHelperGuiAdapter;
 import com.zack88604.autoupdater.gui.swing.SwingGuiAdapterFactory;
 import com.zack88604.autoupdater.gui.swing.SwingGuiPresetChooser;
 
@@ -95,12 +98,10 @@ public final class AgentBootstrap {
 
             GuiPreset preset = selection.getPreset();
             try {
-                GuiAdapterFactory factory = new ExternalGuiAdapterFactoryLoader().load(preset);
-                GuiAdapter adapter = Objects.requireNonNull(factory.create(context),
-                        "GuiAdapterFactory returned null adapter");
+                GuiAdapter adapter = createPresetAdapter(preset, context);
                 persistSelection(presetStore, selection);
                 return adapter;
-            } catch (RuntimeException | LinkageError error) {
+            } catch (IOException | RuntimeException | LinkageError error) {
                 clearSelection(presetStore);
                 SwingGuiPresetChooser.showLoadFailure(preset);
                 return createBuiltInAdapter(context);
@@ -110,6 +111,20 @@ public final class AgentBootstrap {
             SwingGuiPresetChooser.showStorageFailure();
             return createBuiltInAdapter(context);
         }
+    }
+
+    private static GuiAdapter createPresetAdapter(GuiPreset preset, GuiAdapterContext context)
+            throws IOException {
+        ExternalGuiAdapterFactoryLoader loader = new ExternalGuiAdapterFactoryLoader();
+        if (preset.usesJavaHelperRuntime()) {
+            JavaHelperGuiPresetFactory factory = loader.loadJavaHelper(preset);
+            JavaHelperLaunchSpec launchSpec = Objects.requireNonNull(factory.create(context),
+                    "JavaHelperGuiPresetFactory returned null launch specification");
+            return new JavaHelperGuiAdapter(preset, context, launchSpec);
+        }
+        GuiAdapterFactory factory = loader.load(preset);
+        return Objects.requireNonNull(factory.create(context),
+                "GuiAdapterFactory returned null adapter");
     }
 
     private static GuiAdapter createConfiguredAdapter(String factoryClassName,

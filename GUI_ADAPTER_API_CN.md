@@ -4,12 +4,15 @@
 接口边界。你可以用 Swing、JavaFX 或任意其他工具包实现自己的 GUI，**完全不需要改动
 更新逻辑、文件同步或生命周期控制**（由谁释放 Minecraft 启动锁、何时退出 JVM）。
 
-本文档包含四个部分：
+本文档包含七个部分：
 
 1. [更新器如何驱动 GUI](#1-更新器如何驱动-gui)
 2. [教程：打造自己的 GUI](#2-教程5-步打造自己的-gui)
 3. [注册你的 adapter](#3-注册你的-adapter)
 4. [API 参考](#4-api-参考)
+5. [规则与常见陷阱](#5-规则与常见陷阱)
+6. [测试你的 adapter](#6-测试你的-adapter)
+7. [V2 Java helper 预设](#7-v2-java-helper-预设)
 
 > 可运行的参考实现位于 `com.zack88604.autoupdater.gui.swing`（内建 Swing adapter），
 > 为自己的工具包实现时照它来写即可。
@@ -469,3 +472,86 @@ DownloadProgress.active(String path, Kind kind, long downloadedBytes,
 4. 修改一个受管文件以触发 `DOWNLOADING`；从清单删除一项以触发 `CLEANING`；
    运行中停掉服务器以验证故障转移与失败路径（确认 `EXIT_FAILURE` 时关闭窗口会
    退出 JVM）。
+
+---
+
+## 7. V2 Java helper 预设
+
+当 GUI 需要 JavaFX、Compose Desktop 等不应进入 Minecraft JVM 的运行时时，使用
+V2 预设。用户接受外部代码风险提示后，更新器才会校验并解压运行时产物，然后启动
+独立的 Java 子进程。子进程只接收完整的 `UpdateUiState` 快照，并且只能传回标准的
+关闭动作。
+
+V1 预设保持不变：省略 `preset-api` 或将其设为 `1`，并按前文实现
+`GuiAdapterFactory` 即可。
+
+### 7.1 预设元数据
+
+```properties
+# META-INF/mc-update-gui.properties
+preset-api=2
+name=Example Java Helper
+version=1.0.0
+factory-class=com.example.updategui.HelperPresetFactory
+runtime-kind=java-helper
+runtime-manifest=META-INF/mc-update-runtime.properties
+```
+
+factory 必须实现 `JavaHelperGuiPresetFactory`、拥有 public 无参构造器，并且不能在
+方法签名或 static 初始化中引用 JavaFX 或其他运行时类。
+
+### 7.2 运行时清单
+
+```properties
+# META-INF/mc-update-runtime.properties
+helper-main-class=com.example.updategui.FxHelperMain
+minimum-java-version=11
+
+# 解压到 .mc-update/gui-runtimes/<preset-hash>/ 的 JAR 内资源
+module-path=runtime/javafx-base.jar,runtime/javafx-graphics.jar,runtime/javafx-controls.jar
+add-modules=javafx.controls
+sha256.runtime/javafx-base.jar=<64 位大小写均可的十六进制字符>
+sha256.runtime/javafx-graphics.jar=<64 位大小写均可的十六进制字符>
+sha256.runtime/javafx-controls.jar=<64 位大小写均可的十六进制字符>
+```
+
+普通依赖 JAR 可写在 `classpath` 中。`classpath` 或 `module-path` 中的每个资源都
+必须具有对应的 `sha256.<resource>`。运行时资源必须随 preset JAR 一起打包；更新器
+不会替预设下载任何运行时代码。
+
+### 7.3 Bootstrap 与 helper 入口
+
+```java
+public final class HelperPresetFactory implements JavaHelperGuiPresetFactory {
+    @Override
+    public JavaHelperLaunchSpec create(GuiAdapterContext context) {
+        return JavaHelperLaunchSpec.empty();
+    }
+}
+
+public final class FxHelperMain implements JavaHelperEntrypoint {
+    @Override
+    public void run(JavaHelperSession session) throws Exception {
+        // 启动工具包后，表示已经可以接收渲染命令。
+        session.signalReady();
+        JavaHelperCommand command;
+        while ((command = session.nextCommand()) != null) {
+            switch (command.getType()) {
+                case OPEN:   /* 显示窗口 */ break;
+                case RENDER: /* 渲染 command.getState() */ break;
+                case CLOSE:  /* 关闭窗口并 return */ return;
+                default: break;
+            }
+        }
+    }
+}
+```
+
+helper 显示 `ClosePolicy.CONFIRM` 对话框时，应在显示前调用
+`session.beginCloseConfirmation()`；用户拒绝时调用
+`session.cancelCloseConfirmation()`，确认时调用 `session.requestClose()`。原生窗口
+真正关闭后调用 `session.notifyWindowClosed()`。子进程的 `System.out` 被保留给
+helper 协议，诊断输出请写到 `System.err`。
+
+若校验、解压、Java 版本检查、factory 加载或 helper 启动失败，更新器会清除保存的
+选择并回退到内建 Swing GUI。

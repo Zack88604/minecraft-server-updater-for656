@@ -219,12 +219,23 @@ public final class GuiPresetStore {
                 return null;
             }
 
+            GuiPreset.RuntimeKind runtimeKind = runtimeKind(values);
+            if (runtimeKind == null) {
+                return null;
+            }
+            String runtimeManifestPath = runtimeManifestPath(values, runtimeKind);
+            if (runtimeKind == GuiPreset.RuntimeKind.JAVA_HELPER
+                    && runtimeManifestPath == null) {
+                return null;
+            }
+
             String displayName = trim(values.getProperty("name"));
             if (displayName == null) {
                 displayName = stripJarExtension(archive.getName());
             }
             String version = trim(values.getProperty("version"));
-            return new GuiPreset(archive, displayName, version, factoryClassName);
+            return new GuiPreset(archive, displayName, version, factoryClassName,
+                    runtimeKind, runtimeManifestPath);
         } catch (IOException ignored) {
             return null;
         }
@@ -265,6 +276,40 @@ public final class GuiPresetStore {
                 if (!Character.isJavaIdentifierPart(part.charAt(index))) {
                     return false;
                 }
+            }
+        }
+        return true;
+    }
+
+    private static GuiPreset.RuntimeKind runtimeKind(Properties values) {
+        String apiVersion = trim(values.getProperty("preset-api"));
+        if (apiVersion == null || "1".equals(apiVersion)) {
+            return GuiPreset.RuntimeKind.IN_PROCESS;
+        }
+        if (!"2".equals(apiVersion)) {
+            return null;
+        }
+        String runtimeKind = trim(values.getProperty("runtime-kind"));
+        return "java-helper".equals(runtimeKind)
+                ? GuiPreset.RuntimeKind.JAVA_HELPER : null;
+    }
+
+    private static String runtimeManifestPath(Properties values,
+                                              GuiPreset.RuntimeKind runtimeKind) {
+        if (runtimeKind != GuiPreset.RuntimeKind.JAVA_HELPER) {
+            return null;
+        }
+        String path = trim(values.getProperty("runtime-manifest"));
+        return isSafeArchivePath(path) ? path : null;
+    }
+
+    private static boolean isSafeArchivePath(String path) {
+        if (path == null || path.startsWith("/") || path.indexOf('\\') >= 0) {
+            return false;
+        }
+        for (String segment : path.split("/")) {
+            if (segment.isEmpty() || ".".equals(segment) || "..".equals(segment)) {
+                return false;
             }
         }
         return true;

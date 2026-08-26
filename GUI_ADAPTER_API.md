@@ -5,12 +5,15 @@ The updater exposes a stable, toolkit-neutral GUI boundary in
 or any other toolkit **without touching the update logic, file synchronization, or
 lifecycle control** (who releases the Minecraft launch latch and when the JVM exits).
 
-This guide has four parts:
+This guide has seven parts:
 
 1. [How the updater drives a GUI](#1-how-the-updater-drives-a-gui)
 2. [Tutorial: build your own GUI](#2-tutorial-build-your-own-gui-in-5-steps)
 3. [Registering your adapter](#3-registering-your-adapter)
 4. [API reference](#4-api-reference)
+5. [Rules & common pitfalls](#5-rules--common-pitfalls)
+6. [Testing your adapter](#6-testing-your-adapter)
+7. [V2 Java helper presets](#7-v2-java-helper-presets)
 
 > A working reference implementation lives in `com.zack88604.autoupdater.gui.swing`
 > (the built-in Swing adapter). Mirror it for your own toolkit.
@@ -481,3 +484,91 @@ DownloadProgress.active(String path, Kind kind, long downloadedBytes,
 4. Touch a managed file to exercise `DOWNLOADING`; remove a manifest entry to
    exercise `CLEANING`; stop the server mid-flight to exercise failover and failure
    paths (confirm `EXIT_FAILURE` exits the JVM on close).
+
+---
+
+## 7. V2 Java helper presets
+
+Use a V2 preset when the GUI needs a runtime that must not enter the Minecraft
+JVM, such as JavaFX or Compose Desktop. The updater verifies and extracts the
+runtime artifacts only after the user accepts the external-code warning, then
+starts a child Java process. The child receives complete `UpdateUiState`
+snapshots and can return only the standard close actions.
+
+V1 presets remain unchanged: omit `preset-api` or set it to `1` and implement
+`GuiAdapterFactory` as described above.
+
+### 7.1 Archive metadata
+
+```properties
+# META-INF/mc-update-gui.properties
+preset-api=2
+name=Example Java Helper
+version=1.0.0
+factory-class=com.example.updategui.HelperPresetFactory
+runtime-kind=java-helper
+runtime-manifest=META-INF/mc-update-runtime.properties
+```
+
+The factory must implement `JavaHelperGuiPresetFactory`, have a public no-arg
+constructor, and keep JavaFX/other runtime classes out of its signature and
+static initialization.
+
+### 7.2 Runtime manifest
+
+```properties
+# META-INF/mc-update-runtime.properties
+helper-main-class=com.example.updategui.FxHelperMain
+minimum-java-version=11
+
+# Archive resources to extract to .mc-update/gui-runtimes/<preset-hash>/
+module-path=runtime/javafx-base.jar,runtime/javafx-graphics.jar,runtime/javafx-controls.jar
+add-modules=javafx.controls
+sha256.runtime/javafx-base.jar=<64 lowercase-or-uppercase hex characters>
+sha256.runtime/javafx-graphics.jar=<64 lowercase-or-uppercase hex characters>
+sha256.runtime/javafx-controls.jar=<64 lowercase-or-uppercase hex characters>
+```
+
+`classpath` is available for ordinary dependency JARs. Every resource named by
+`classpath` or `module-path` requires a matching `sha256.<resource>` value.
+Runtime resources must be packaged inside the preset archive; the updater never
+downloads runtime code on a preset's behalf.
+
+### 7.3 Bootstrap and helper entry point
+
+```java
+public final class HelperPresetFactory implements JavaHelperGuiPresetFactory {
+    @Override
+    public JavaHelperLaunchSpec create(GuiAdapterContext context) {
+        return JavaHelperLaunchSpec.empty();
+    }
+}
+
+public final class FxHelperMain implements JavaHelperEntrypoint {
+    @Override
+    public void run(JavaHelperSession session) throws Exception {
+        // Start your toolkit, then signal that it can accept rendering.
+        session.signalReady();
+        JavaHelperCommand command;
+        while ((command = session.nextCommand()) != null) {
+            switch (command.getType()) {
+                case OPEN:   /* show window */ break;
+                case RENDER: /* render command.getState() */ break;
+                case CLOSE:  /* close window and return */ return;
+                default: break;
+            }
+        }
+    }
+}
+```
+
+When the helper shows a `ClosePolicy.CONFIRM` dialog, call
+`session.beginCloseConfirmation()` before displaying it; call
+`session.cancelCloseConfirmation()` on rejection, or `session.requestClose()`
+on confirmation. Call `session.notifyWindowClosed()` after native close. Never
+write diagnostic text to `System.out` in the child process: it is reserved for
+the helper protocol; use `System.err` instead.
+
+If verification, extraction, Java-version validation, factory loading, or
+helper startup fails, the updater clears the remembered selection and falls
+back to the built-in Swing GUI.
