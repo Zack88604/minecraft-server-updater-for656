@@ -9,6 +9,8 @@ import com.zack88604.autoupdater.gui.api.GuiAdapterContext;
 import com.zack88604.autoupdater.gui.api.GuiAdapterFactory;
 import com.zack88604.autoupdater.gui.api.JavaHelperGuiPresetFactory;
 import com.zack88604.autoupdater.gui.api.JavaHelperLaunchSpec;
+import com.zack88604.autoupdater.gui.javafx.JavaFxGuiAdapterFactory;
+import com.zack88604.autoupdater.gui.javafx.JavaFxRuntimeManager;
 import com.zack88604.autoupdater.gui.preset.ExternalGuiAdapterFactoryLoader;
 import com.zack88604.autoupdater.gui.preset.GuiPreset;
 import com.zack88604.autoupdater.gui.preset.GuiPresetSelection;
@@ -204,7 +206,23 @@ public final class AgentBootstrap {
         }
     }
 
+    /**
+     * Built-in GUI adapter: the embedded JavaFX GUI when its runtime is READY,
+     * otherwise Swing. Phase 2A makes "this session Swing, next session JavaFX"
+     * work end-to-end: when the runtime is not READY the session stays on Swing
+     * and an asynchronous repair prepares the runtime for the NEXT launch. The
+     * repair must be started here — not only in {@code JavaFxHelperProcess.launch},
+     * which is reached only when the JavaFX adapter is selected — because the
+     * default selection path (no {@code gui-adapter} config) never instantiates
+     * the JavaFX adapter under Swing, so without this call nothing would ever
+     * download the missing runtime.
+     */
     private static GuiAdapter createBuiltInAdapter(GuiAdapterContext context) {
+        if (JavaFxRuntimeManager.verifyLocal()
+                == JavaFxRuntimeManager.RuntimeStatus.READY) {
+            return new JavaFxGuiAdapterFactory().create(context);
+        }
+        JavaFxRuntimeManager.ensureReadyAsync();
         return new SwingGuiAdapterFactory().create(context);
     }
 

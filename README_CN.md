@@ -18,7 +18,7 @@
 | 组件 | 职责 |
 |------|------|
 | **服务端** (Python/Flask, Docker) | 托管文件清单与资源下载的 REST API。 |
-| **Agent** (Java, `-javaagent`) | Minecraft 启动时加载 — 检查更新、显示 GUI 进度、同步文件，完成后启动游戏。 |
+| **Agent** (Java, `-javaagent`) | Minecraft 启动时加载 — 检查更新、显示内建 JavaFX GUI（隔离 helper JVM，Swing 自动回退）、同步文件，完成后启动游戏。 |
 
 ### 双 JAR 设计（安全自更新）
 
@@ -26,6 +26,25 @@
 |-----|------|
 | `UpdateAgent.jar`（启动器） | 由 `-javaagent` 加载的薄封装层。启动时若存在 `.jar.new` 则替换核心 JAR，然后委托给核心逻辑。**永不更新**，避免了 Windows 平台的文件锁问题。 |
 | `UpdateAgent_core.jar`（核心） | 实际的更新逻辑：HTTP 同步、GUI、文件清理。**可自更新** — 新版本下载为 `.jar.new`，下次启动时替换。 |
+
+### 内建 JavaFX GUI（自动供应）
+
+内建 GUI 是 JavaFX 21，但 Minecraft JVM **永远不会加载 `javafx.*`**。窗口运行在
+**独立的 helper JVM** 中，通过 `--module-path <agent-dir>/javafx-runtime/<version>`
+启动，并以 stdin/stdout 上的小型 JSONL 协议驱动；核心 agent 只投递非阻塞消息并
+读回用户操作。
+
+JavaFX 运行时是**自动供应的**。核心 JAR 内嵌 `javafx-runtime-spec.json`，固定了
+当前平台的精确版本、模块 JAR、大小与 SHA-256 哈希。每次启动 agent 会：
+
+1. 依据该 spec 校验本地 `javafx-runtime/<version>/` 目录。
+2. 若缺失或损坏，且平台/JDK 支持（JDK 17+），后台修复会从 Maven Central
+   （`org.openjfx`，默认 `https://repo1.maven.org/maven2`）下载 JAR 并原子安装。
+3. 修复期间当前会话**留在 Swing** — 下载慢或失败都不会阻塞 Minecraft 启动；
+   运行时将在下次启动时就绪。
+
+Swing 始终是自动回退：运行时缺失、JDK 过旧、平台不支持，或 helper JVM 无法启动、
+崩溃、卡死时，更新器会用最新快照在 Swing 上重建同一个窗口。
 
 ### 启动流程
 
@@ -39,6 +58,7 @@ sequenceDiagram
     L->>L: 存在 .new 则替换核心 JAR
     L->>A: 加载 UpdateAgent_core.jar 并委托
     A->>A: 解析配置、选择 GUI adapter
+    A->>A: 校验内建 JavaFX 运行时（缺失时自动修复）
     A->>S: GET /api/v2/manifest
     A->>A: agent 自更新检查
     loop 每个受管文件
@@ -64,6 +84,7 @@ sequenceDiagram
 | `gui.api` | 与工具包无关的 GUI 契约与 Java helper 协议 API。 |
 | `gui.swing` | 内建 Swing adapter 与受信任的预设选择器。 |
 | `gui.preset` | V1 进程内与 V2 隔离 helper 预设的发现、校验与加载。 |
+| `gui.javafx` | 内建 JavaFX GUI：隔离 helper JVM、运行时校验与修复、JSONL 传输。 |
 | `bootstrap` / `config` | Agent 入口组装与配置优先级解析。 |
 
 ## 快速开始
@@ -101,6 +122,11 @@ agent\build.bat
 agent\setup-agent.bat C:\path\to\instance http://your-server:25565
 ```
 
+`build.sh` / `build.bat` 首次构建时自动从 Maven Central 下载 JavaFX 21.0.4
+build jars 到 `agent/lib/javafx/`（需要 curl 与网络），并把固定版本的
+`javafx-runtime-spec.json` 嵌入核心 JAR — agent 用该 spec 在最终用户机器上下载并
+校验 JavaFX 运行时。
+
 安装脚本会将服务器配置写入游戏目录下的 `mc-update.properties`，并向启动器 JVM 参数追加 `-javaagent:<path>/UpdateAgent.jar`。
 
 更新器拥有的运行时文件：
@@ -113,6 +139,17 @@ agent\setup-agent.bat C:\path\to\instance http://your-server:25565
     ├── gui-server-trust.properties       # 已批准的服务端预设身份
     ├── gui-presets/                      # 本地及服务端下载的预设 JAR
     └── gui-runtimes/                     # 已校验的 V2 helper 运行时解压目录
+```
+
+JavaFX 运行时位于 **agent 核心 JAR 旁**（同一安装目录启动的所有实例共享），
+不在游戏目录内：
+
+```text
+<agent-dir>/
+└── javafx-runtime/
+    ├── runtime.json                      # 已安装版本 + 平台 classifier
+    ├── .installed                        # 完整安装的事务提交标记
+    └── 21.0.4/                           # 依据内建 spec 校验的模块 JAR
 ```
 
 ## API
@@ -130,13 +167,19 @@ agent\setup-agent.bat C:\path\to\instance http://your-server:25565
 
 ## GUI Adapter 开发
 
-更新器通过一个与工具包无关的 GUI 边界渲染界面。内建 Swing adapter 是默认实现；
-自定义工具包**无需改动更新逻辑与生命周期控制**即可接入，有两种方式：
+更新器通过一个与工具包无关的 GUI 边界渲染界面。内建 JavaFX adapter（隔离 helper
+JVM，Swing 自动回退）是默认实现；自定义工具包**无需改动更新逻辑与生命周期控制**
+即可接入，有两种方式：
 
 | 方式 | 做法 | 适用场景 |
 |------|------|----------|
 | **编译进核心 + 属性** | 把工厂编译进核心 JAR，配置 `mc-update.gui-adapter=<类名>` | 你维护/重新构建 agent |
 | **外部预设** | 把 V1 adapter JAR 或 V2 Java-helper JAR 放进 `.mc-update/gui-presets/`，首次启动时选择 | 独立分发 GUI，无需重构建 agent |
+
+内建 adapter — JavaFX（默认）与 Swing（回退）— 本身就是编译进核心的 adapter
+（`com.zack88604.autoupdater.gui.javafx.JavaFxGuiAdapterFactory` /
+`com.zack88604.autoupdater.gui.swing.SwingGuiAdapterFactory`）。外部代码风险确认
+对话框仅适用于**外部**预设；内建 JavaFX 运行时依据固定 spec 校验，不会弹窗确认。
 
 完整教程与 API 参考见 [GUI Adapter API](GUI_ADAPTER_API_CN.md)。
 
@@ -166,10 +209,16 @@ agent\setup-agent.bat C:\path\to\instance http://your-server:25565
 | `mc-update.server` | `http://localhost:25565` | 服务器地址 — 支持**逗号分隔多源**，自动故障转移 |
 | `mc-update.game-dir` | `.` | Minecraft 目录 |
 | `mc-update.debug` | `false` | 同步完成后保持窗口打开 |
-| `mc-update.gui-adapter` | *（内建 Swing）* | `GuiAdapterFactory` 的完整类名 |
+| `mc-update.gui-adapter` | *（内建 JavaFX，Swing 回退）* | `GuiAdapterFactory` 的完整类名 |
 | `mc-update.server-gui` | `disabled` | 服务端预设策略：`disabled`、`recommended` 或 `required` |
 | `mc-update.server-gui-key-id` | *（空）* | 服务端 GUI 预设要求的签名 key id |
 | `mc-update.server-gui-public-key` | *（空）* | 客户端固定的 Base64 X.509 Ed25519 公钥 |
+
+内建 JavaFX GUI 需要 JDK 17+，首次使用时从 Maven Central 下载 JavaFX 21 运行时
+（见上文「内建 JavaFX GUI」）。旧 JDK、离线机器与不支持的平台会自动留在 Swing —
+可设置
+`mc-update.gui-adapter=com.zack88604.autoupdater.gui.swing.SwingGuiAdapterFactory`
+强制使用。
 
 **推荐方式：`mc-update.properties`**（由安装脚本写入）：
 ```properties
@@ -261,6 +310,11 @@ Ed25519 校验需要 Java 15 或更新版本；旧 JVM 会回退到 Swing。生�
     ├── META-INF/MANIFEST.MF              # java-agent 启动器清单
     ├── build.sh / build.bat              # 构建两个 JAR
     ├── setup-agent.sh / setup-agent.bat  # 写入游戏目录配置
+    ├── javafx/
+    │   ├── ui.css                        # JavaFX 样式表，嵌入核心 JAR
+    │   └── javafx-runtime-spec.json      # 固定的 JavaFX 运行时 spec（SHA-256），嵌入核心 JAR
+    ├── images/                           # JavaFX UI 插图，嵌入核心 JAR
+    ├── lib/javafx/                       # JavaFX 21 build jars（自动下载，不入库）
     └── src/
         ├── Launcher.java                 # 稳定启动器，不自更新
         ├── UpdateAgent.java              # 兼容性 facade
@@ -272,6 +326,7 @@ Ed25519 校验需要 Java 15 或更新版本；旧 JVM 会回退到 Swing。生�
             ├── infrastructure/           # 文件、HTTP、JSON
             └── gui/
                 ├── api/                  # 对外 GUI 与 helper 契约
+                ├── javafx/               # 内建 JavaFX GUI（helper JVM + 运行时管理）
                 ├── swing/                # 内建回退 GUI
                 └── preset/               # V1/V2 外部预设运行时
 ```

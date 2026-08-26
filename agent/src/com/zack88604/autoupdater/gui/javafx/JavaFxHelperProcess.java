@@ -68,11 +68,27 @@ final class JavaFxHelperProcess {
     }
 
     /**
-     * Launch the helper JVM and attach it to the view. On any failure (no usable
-     * java, missing core JAR, missing JavaFX runtime, OS process-start failure)
-     * the view keeps its null helper and falls back to Swing transparently.
+     * Launch the helper JVM and attach it to the view. On any failure (runtime not
+     * READY, no usable java, missing core JAR, missing JavaFX runtime, OS
+     * process-start failure) the view keeps its null helper and falls back to
+     * Swing transparently.
+     *
+     * <p>Phase 2A runtime gate: {@link JavaFxRuntimeManager#verifyLocal()} is the
+     * single decision point. Only a READY runtime may launch the helper; MISSING /
+     * CORRUPTED / UNSUPPORTED never attempts to start a broken runtime — the current
+     * session goes straight to Swing and an asynchronous repair runs in the
+     * background for the next launch.</p>
      */
     static void launch(GuiAdapterContext context, RemoteJavaFxUpdateView view) {
+        JavaFxRuntimeManager.RuntimeStatus runtimeStatus =
+                JavaFxRuntimeManager.verifyLocal();
+        if (runtimeStatus != JavaFxRuntimeManager.RuntimeStatus.READY) {
+            System.err.println("[javafx] JavaFX runtime not READY (" + runtimeStatus
+                    + ") — staying on Swing this session; repairing for next launch.");
+            JavaFxRuntimeManager.ensureReadyAsync();
+            view.attachHelper(null);
+            return;
+        }
         File java = locateJava();
         if (java == null) {
             System.err.println("[javafx] Cannot locate java binary for helper JVM.");
@@ -87,7 +103,9 @@ final class JavaFxHelperProcess {
         }
         File runtime = JavaFxRuntimeManager.runtimeVersionDir();
         if (runtime == null || !runtime.isDirectory()) {
-            System.err.println("[javafx] No installed JavaFX runtime (javafx-runtime/<version>).");
+            // Defensive: verifyLocal() said READY but the directory vanished — do
+            // not pass a bad --module-path to the helper; fall back to Swing.
+            System.err.println("[javafx] Installed JavaFX runtime directory unavailable.");
             view.attachHelper(null);
             return;
         }

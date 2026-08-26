@@ -18,7 +18,7 @@
 | Component | Role |
 |-----------|------|
 | **Server** (Python/Flask, Docker) | Hosts file manifests & resource downloads via a REST API. |
-| **Agent** (Java, `-javaagent`) | Loaded at Minecraft startup — checks for updates, shows GUI progress, syncs files, then lets the game launch. |
+| **Agent** (Java, `-javaagent`) | Loaded at Minecraft startup — checks for updates, shows an embedded JavaFX GUI (isolated helper JVM, automatic Swing fallback), syncs files, then lets the game launch. |
 
 ### Two-JAR design (safe self-update)
 
@@ -26,6 +26,30 @@
 |-----|------|
 | `UpdateAgent.jar` (Launcher) | Thin wrapper loaded by `-javaagent`. Replaces the core JAR at startup if a `.jar.new` exists, then delegates to it. **Never updated**, which avoids file-lock issues on Windows. |
 | `UpdateAgent_core.jar` (Core) | The actual update logic: HTTP sync, GUI, file cleanup. **Can be self-updated** — a new version is downloaded as `.jar.new` and swapped in on the next launch. |
+
+### Embedded JavaFX GUI (auto-provisioned)
+
+The built-in GUI is JavaFX 21, but the Minecraft JVM **never loads `javafx.*`**.
+The window lives in a **separate helper JVM** launched with
+`--module-path <agent-dir>/javafx-runtime/<version>` and driven by a small JSONL
+protocol over stdin/stdout; the core agent only enqueues non-blocking messages
+and reads back user actions.
+
+The JavaFX runtime is **self-provisioning**. The core JAR embeds a
+`javafx-runtime-spec.json` that pins the exact version, module jars, sizes and
+SHA-256 hashes for the current platform. On every launch the agent:
+
+1. Verifies the local `javafx-runtime/<version>/` directory against that spec.
+2. If it is missing or corrupt and the platform/JDK can host it (JDK 17+), a
+   background repair downloads the jars from Maven Central (`org.openjfx`,
+   default `https://repo1.maven.org/maven2`) and atomically installs them.
+3. The current session **stays on Swing** while the repair runs — a slow or
+   failed download never blocks Minecraft from launching; the runtime is ready
+   for the next launch.
+
+Swing is always the automatic fallback: when the runtime is missing, the JDK is
+too old, the platform is unsupported, or the helper JVM cannot start, crashes,
+or stalls, the updater rebuilds the same window from the latest snapshot on Swing.
 
 ### Startup flow
 
@@ -39,6 +63,7 @@ sequenceDiagram
     L->>L: swap core JAR if .new exists
     L->>A: load UpdateAgent_core.jar + delegate
     A->>A: resolve config, pick GUI adapter
+    A->>A: verify embedded JavaFX runtime (auto-repair if missing)
     A->>S: GET /api/v2/manifest
     A->>A: agent self-update check
     loop each managed file
@@ -64,6 +89,7 @@ The core agent is composed of small layers (all under `com.zack88604.autoupdater
 | `gui.api` | Toolkit-neutral GUI contracts and Java-helper protocol APIs. |
 | `gui.swing` | Built-in Swing adapter and trusted preset chooser. |
 | `gui.preset` | V1 in-process and V2 isolated helper preset discovery, validation, and loading. |
+| `gui.javafx` | Embedded JavaFX GUI: isolated helper JVM, runtime verification & repair, JSONL transport. |
 | `bootstrap` / `config` | Agent entry point composition and configuration resolution. |
 
 ## Quick Start
@@ -101,6 +127,11 @@ agent\build.bat
 agent\setup-agent.bat C:\path\to\instance http://your-server:25565
 ```
 
+`build.sh` / `build.bat` auto-download the JavaFX 21.0.4 build jars from Maven
+Central into `agent/lib/javafx/` on first build (needs curl and network access),
+and embed the pinned `javafx-runtime-spec.json` into the core JAR — the agent
+uses that spec to download and verify the JavaFX runtime on end-user machines.
+
 The setup script writes server configuration to `mc-update.properties` in the game directory and appends `-javaagent:<path>/UpdateAgent.jar` to the launcher's JVM arguments.
 
 Runtime files owned by the updater:
@@ -113,6 +144,17 @@ Runtime files owned by the updater:
     ├── gui-server-trust.properties       # approved signed server preset identity
     ├── gui-presets/                      # local and server-downloaded preset JARs
     └── gui-runtimes/                     # verified V2 helper runtime extraction
+```
+
+The JavaFX runtime lives **next to the agent core JAR** (shared by every instance
+launched from that installation), not in the game directory:
+
+```text
+<agent-dir>/
+└── javafx-runtime/
+    ├── runtime.json                      # installed version + platform classifier
+    ├── .installed                        # commit marker for a fully installed runtime
+    └── 21.0.4/                           # module jars verified against the embedded spec
 ```
 
 ## API
@@ -130,14 +172,22 @@ Runtime files owned by the updater:
 
 ## GUI Adapter Development
 
-The updater renders through a toolkit-neutral GUI boundary. The built-in Swing
-adapter is the default; custom toolkits can plug in **without touching update
-logic or lifecycle control** in two ways:
+The updater renders through a toolkit-neutral GUI boundary. The built-in JavaFX
+adapter (isolated helper JVM, automatic Swing fallback) is the default; custom
+toolkits can plug in **without touching update logic or lifecycle control** in
+two ways:
 
 | Way | How | When to use |
 |-----|-----|-------------|
 | **Compile-in + property** | Compile your factory into the core JAR, set `mc-update.gui-adapter=<class>` | You own/rebuild the agent. |
 | **External preset** | Drop a V1 adapter JAR or V2 Java-helper JAR into `.mc-update/gui-presets/`, then choose it on first launch | Distributing a GUI independently, no agent rebuild. |
+
+The built-in adapters — JavaFX (default) and Swing (fallback) — are themselves
+compile-in adapters
+(`com.zack88604.autoupdater.gui.javafx.JavaFxGuiAdapterFactory` /
+`com.zack88604.autoupdater.gui.swing.SwingGuiAdapterFactory`). The external-code
+approval dialog applies only to **external** presets; the embedded JavaFX runtime
+is verified against a pinned spec and never prompts.
 
 See [GUI Adapter API](GUI_ADAPTER_API.md) for the full tutorial and API reference.
 
@@ -167,10 +217,16 @@ Configuration is resolved in this order (normal mode):
 | `mc-update.server` | `http://localhost:25565` | Server URL(s) — comma-separated for **multi-source fallback** |
 | `mc-update.game-dir` | `.` | Minecraft directory |
 | `mc-update.debug` | `false` | Keep GUI open after sync |
-| `mc-update.gui-adapter` | *(built-in Swing)* | Fully qualified `GuiAdapterFactory` class |
+| `mc-update.gui-adapter` | *(built-in JavaFX, Swing fallback)* | Fully qualified `GuiAdapterFactory` class |
 | `mc-update.server-gui` | `disabled` | `disabled`, `recommended`, or `required` server-preset policy |
 | `mc-update.server-gui-key-id` | *(empty)* | Required signing key id for a server GUI preset |
 | `mc-update.server-gui-public-key` | *(empty)* | Base64 X.509 Ed25519 public key pinned by this client |
+
+The built-in JavaFX GUI needs JDK 17+ and downloads its JavaFX 21 runtime from
+Maven Central on first use (see *Embedded JavaFX GUI*). Older JDKs, offline
+machines, and unsupported platforms automatically stay on Swing — set
+`mc-update.gui-adapter=com.zack88604.autoupdater.gui.swing.SwingGuiAdapterFactory`
+to force it.
 
 **Recommended: `mc-update.properties`** (written by setup script):
 ```properties
@@ -267,6 +323,11 @@ cleaned up. Defaults: `managed_paths: ["*"]`, `excluded_paths: []`.
     ├── META-INF/MANIFEST.MF              # java-agent launcher manifest
     ├── build.sh / build.bat              # builds the two JARs
     ├── setup-agent.sh / setup-agent.bat  # writes game-directory setup
+    ├── javafx/
+    │   ├── ui.css                        # JavaFX stylesheet, embedded in the core JAR
+    │   └── javafx-runtime-spec.json      # pinned JavaFX runtime spec (SHA-256), embedded
+    ├── images/                           # JavaFX UI illustrations, embedded in the core JAR
+    ├── lib/javafx/                       # JavaFX 21 build jars (auto-downloaded, not committed)
     └── src/
         ├── Launcher.java                 # stable launcher, never self-updated
         ├── UpdateAgent.java              # compatibility facade
@@ -278,6 +339,7 @@ cleaned up. Defaults: `managed_paths: ["*"]`, `excluded_paths: []`.
             ├── infrastructure/           # files, HTTP, JSON
             └── gui/
                 ├── api/                  # public GUI and helper contracts
+                ├── javafx/               # embedded JavaFX GUI (helper JVM + runtime manager)
                 ├── swing/                # built-in fallback GUI
                 └── preset/               # V1/V2 external preset runtime
 ```
