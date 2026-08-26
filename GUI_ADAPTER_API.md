@@ -337,16 +337,17 @@ jar cf my-gui.jar -C classes . -C meta META-INF
    pick an external preset or the built-in Swing GUI. A checkbox ("remember") saves
    the choice to `gui-selection.properties`.
 2. **Saved Swing choice** → starts directly.
-3. **Saved external preset** → every launch shows a **risk confirmation** before the
-   preset JAR is loaded.
-4. **Fallback**: if the user declines, the JAR fails to load, or the preset metadata
-   disappears → the updater falls back to built-in Swing (a failed load also clears
-   the saved selection).
+3. **Saved external preset** → starts directly. The risk confirmation is shown only
+   when the user first chooses that external preset.
+4. **Fallback**: if the user declines the initial confirmation, the JAR fails to load,
+   or the preset metadata disappears → the updater falls back to built-in Swing (a
+   failed load also clears the saved selection).
 5. Delete `gui-selection.properties` → the chooser appears again.
 
 #### Security
 
-- Classes are loaded **only after** the user confirms the warning.
+- Classes are loaded **only after** the user confirms the warning when first choosing
+  an external preset. A remembered selection is loaded directly on later launches.
 - An external preset executes code **inside the game process**: it may read or modify
   files, access the network, or affect the game. Install only JARs from a trusted source.
 
@@ -510,8 +511,8 @@ DownloadProgress.active(String path, Kind kind, long downloadedBytes,
 
 Use a V2 preset when the GUI needs a runtime that must not enter the Minecraft
 JVM, such as JavaFX or Compose Desktop. The updater verifies and extracts the
-runtime artifacts only after the user accepts the external-code warning, then
-starts a child Java process. The child receives complete, latest-state
+runtime artifacts only after the user accepts the external-code warning when first
+choosing the preset, then starts a child Java process. The child receives complete, latest-state
 `UpdateUiState` snapshots and can return only the standard close actions.
 
 V1 presets remain unchanged: omit `preset-api` or set it to `1` and implement

@@ -43,21 +43,6 @@ public final class SwingGuiPresetChooser {
         }, GuiPresetSelection.swing(false));
     }
 
-    /**
-     * Warn before loading a remembered external JAR. The warning is displayed
-     * on every automatic external-preset load.
-     */
-    public static boolean confirmExternalPreset(GuiPreset preset) {
-        if (GraphicsEnvironment.isHeadless()) {
-            return false;
-        }
-        return onEventThread(new Callable<Boolean>() {
-            @Override
-            public Boolean call() {
-                return showRiskDialog(preset);
-            }
-        }, false);
-    }
 
     /** Tell the user that an approved external preset could not be loaded. */
     public static void showLoadFailure(final GuiPreset preset) {

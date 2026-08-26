@@ -86,9 +86,6 @@ public final class AgentBootstrap {
             GuiPresetSelection selection = presetStore.readDefault(presets);
             if (selection == null) {
                 selection = SwingGuiPresetChooser.choose(presets);
-            } else if (!selection.isSwing()
-                    && !SwingGuiPresetChooser.confirmExternalPreset(selection.getPreset())) {
-                selection = GuiPresetSelection.swing(false);
             }
 
             if (selection.isSwing()) {
