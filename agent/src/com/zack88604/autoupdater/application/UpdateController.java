@@ -28,11 +28,13 @@ public final class UpdateController implements UpdateViewActions {
     private final CountDownLatch workerFinished = new CountDownLatch(1);
     private final boolean debug;
     private final UpdateExecutionControl executionControl = new UpdateExecutionControl();
+    private final LatestStateRenderer stateRenderer;
     private final Object stateLock = new Object();
     private final Object closeLock = new Object();
 
     private UpdateUiState state = UpdateUiState.initial();
     private volatile UpdateView view;
+    private volatile ClosePolicy closePolicy = ClosePolicy.CONFIRM;
     private boolean started;
     private boolean confirmationPaused;
     private boolean closeRequested;
@@ -43,6 +45,7 @@ public final class UpdateController implements UpdateViewActions {
         this.guiAdapter = Objects.requireNonNull(guiAdapter, "guiAdapter");
         this.launchLatch = Objects.requireNonNull(launchLatch, "launchLatch");
         this.debug = debug;
+        stateRenderer = new LatestStateRenderer(guiAdapter.dispatcher(), this::renderState);
     }
 
     /** Create, open, and begin driving the update view exactly once. */
@@ -67,7 +70,7 @@ public final class UpdateController implements UpdateViewActions {
 
     @Override
     public void beginCloseConfirmation() {
-        if (snapshot().getClosePolicy() != ClosePolicy.CONFIRM) {
+        if (closePolicy != ClosePolicy.CONFIRM) {
             return;
         }
         synchronized (closeLock) {
@@ -92,13 +95,13 @@ public final class UpdateController implements UpdateViewActions {
 
     @Override
     public void requestClose() {
-        ClosePolicy closePolicy = snapshot().getClosePolicy();
-        if (closePolicy == ClosePolicy.EXIT_FAILURE) {
+        ClosePolicy currentClosePolicy = closePolicy;
+        if (currentClosePolicy == ClosePolicy.EXIT_FAILURE) {
             System.exit(1);
             return;
         }
 
-        if (closePolicy == ClosePolicy.CONFIRM) {
+        if (currentClosePolicy == ClosePolicy.CONFIRM) {
             if (markCloseRequested(true)) {
                 rollbackThenLaunch(false);
             }
@@ -113,13 +116,13 @@ public final class UpdateController implements UpdateViewActions {
 
     @Override
     public void notifyWindowClosed() {
-        ClosePolicy closePolicy = snapshot().getClosePolicy();
-        if (closePolicy == ClosePolicy.EXIT_FAILURE) {
+        ClosePolicy currentClosePolicy = closePolicy;
+        if (currentClosePolicy == ClosePolicy.EXIT_FAILURE) {
             System.exit(1);
             return;
         }
 
-        if (closePolicy == ClosePolicy.CONFIRM) {
+        if (currentClosePolicy == ClosePolicy.CONFIRM) {
             if (markCloseRequested(true)) {
                 rollbackThenLaunch(true);
             }
@@ -205,25 +208,28 @@ public final class UpdateController implements UpdateViewActions {
         worker.start();
     }
 
-    /** Receive a business event on the update worker and schedule one render. */
+    /** Receive a business event on the update worker and schedule its latest state. */
     private void onUpdateEvent(UpdateEvent event) {
         UpdateUiState next;
         synchronized (stateLock) {
             state = UpdateStateReducer.reduce(state, event);
+            closePolicy = state.getClosePolicy();
             next = state;
         }
 
-        guiAdapter.dispatcher().dispatch(() -> {
-            UpdateView target = view;
-            if (target != null) {
-                target.render(next);
-            }
-            if (event instanceof UpdateEvent.Completed) {
-                handleCompletion(((UpdateEvent.Completed) event).getResult());
-            } else if (event instanceof UpdateEvent.Failed) {
-                ((UpdateEvent.Failed) event).getCause().printStackTrace();
-            }
-        });
+        stateRenderer.submit(next);
+        if (event instanceof UpdateEvent.Completed) {
+            handleCompletion(((UpdateEvent.Completed) event).getResult());
+        } else if (event instanceof UpdateEvent.Failed) {
+            ((UpdateEvent.Failed) event).getCause().printStackTrace();
+        }
+    }
+
+    private void renderState(UpdateUiState next) {
+        UpdateView target = view;
+        if (target != null) {
+            target.render(next);
+        }
     }
 
     private void handleCompletion(UpdateResult result) {

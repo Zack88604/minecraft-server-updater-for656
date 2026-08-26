@@ -75,8 +75,8 @@ public final class UpdateService {
             activeTransaction = transaction;
         }
 
+        EventRelay relay = new EventRelay(listener, control);
         try {
-            EventRelay relay = new EventRelay(listener, control);
             ServerClient serverClient = new ServerClient(serverUrls, relay);
 
             relay.emit(new UpdateEvent.ServerChanged(serverUrls, serverClient.getCurrentServer()));
@@ -164,6 +164,8 @@ public final class UpdateService {
         } catch (Error error) {
             discardTransaction(transaction, error);
             throw error;
+        } finally {
+            relay.flushLogs();
         }
     }
 
@@ -378,8 +380,11 @@ public final class UpdateService {
     }
 
     private static final class EventRelay implements ServerClient.Listener {
+        private static final int LOG_BATCH_SIZE = 128;
+
         private final UpdateListener listener;
         private final UpdateExecutionControl control;
+        private final List<String> pendingLogs = new ArrayList<String>();
         private String resource;
         private UpdateEvent.DownloadKind downloadKind;
         private long expectedTotalBytes;
@@ -397,12 +402,32 @@ public final class UpdateService {
         }
 
         void emit(UpdateEvent event) {
+            flushLogs();
             checkpoint();
             listener.onUpdateEvent(event);
         }
 
         void log(String message) {
-            emit(new UpdateEvent.LogMessage(message));
+            checkpoint();
+            pendingLogs.add(message);
+            if (pendingLogs.size() >= LOG_BATCH_SIZE) {
+                flushLogs();
+            }
+        }
+
+        void flushLogs() {
+            if (pendingLogs.isEmpty()) {
+                return;
+            }
+            StringBuilder batch = new StringBuilder();
+            for (String line : pendingLogs) {
+                if (batch.length() > 0) {
+                    batch.append('\n');
+                }
+                batch.append(line);
+            }
+            pendingLogs.clear();
+            listener.onUpdateEvent(new UpdateEvent.LogMessage(batch.toString()));
         }
 
         void status(UpdatePhase phase, String status, String description,

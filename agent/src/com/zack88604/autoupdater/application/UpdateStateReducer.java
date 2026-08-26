@@ -19,6 +19,11 @@ import java.util.Objects;
  */
 public final class UpdateStateReducer {
 
+    /** Keep rendering and state reduction bounded during very large cleanups. */
+    static final int MAX_LOG_LINES = 250;
+    private static final String TRUNCATED_LOG_MARKER =
+            "[INFO] Earlier log entries were omitted to keep the updater responsive.";
+
     private UpdateStateReducer() {
     }
 
@@ -40,9 +45,8 @@ public final class UpdateStateReducer {
                     ((UpdateEvent.OverallProgressChanged) event).getPercentage())
                     .overallProgressIndeterminate(false);
         } else if (event instanceof UpdateEvent.LogMessage) {
-            List<String> logLines = new ArrayList<>(current.getLogLines());
-            logLines.add(((UpdateEvent.LogMessage) event).getMessage());
-            builder.logLines(logLines);
+            builder.logLines(appendLog(current.getLogLines(),
+                    ((UpdateEvent.LogMessage) event).getMessage()));
         } else if (event instanceof UpdateEvent.ServerChanged) {
             UpdateEvent.ServerChanged server = (UpdateEvent.ServerChanged) event;
             builder.serverUrls(server.getServerUrls())
@@ -92,8 +96,8 @@ public final class UpdateStateReducer {
                                        UpdateUiState current, UpdateResult result) {
         UpdateSummary summary = new UpdateSummary(result.getUpdatedFiles(), result.getFailedFiles());
         if (result.getFailedFiles() > 0) {
-            List<String> logLines = new ArrayList<>(current.getLogLines());
-            logLines.add("[FATAL] " + result.getFailedFiles()
+            List<String> logLines = appendLog(current.getLogLines(), "[FATAL] "
+                    + result.getFailedFiles()
                     + " file(s) failed to update. Minecraft will not start; close the window to exit.");
             builder.phase(UpdatePhase.ERROR)
                     .status("Update finished with " + result.getFailedFiles() + " error(s)")
@@ -123,9 +127,10 @@ public final class UpdateStateReducer {
 
     private static void applyFailure(UpdateUiState.Builder builder,
                                      UpdateUiState current, UpdateEvent.Failed failure) {
-        List<String> logLines = new ArrayList<>(current.getLogLines());
-        logLines.add("[ERROR] " + failure.getMessage());
-        logLines.add("[FATAL] Update failed. Minecraft will not start; close the window to exit.");
+        List<String> logLines = appendLog(current.getLogLines(),
+                "[ERROR] " + failure.getMessage());
+        logLines = appendLog(logLines,
+                "[FATAL] Update failed. Minecraft will not start; close the window to exit.");
         builder.phase(UpdatePhase.ERROR)
                 .status("Update failed")
                 .description("")
@@ -134,5 +139,30 @@ public final class UpdateStateReducer {
                 .closePolicy(ClosePolicy.EXIT_FAILURE)
                 .errorMessage(failure.getMessage())
                 .logLines(logLines);
+    }
+
+    private static List<String> appendLog(List<String> current, String message) {
+        String[] incoming = message.split("\\n", -1);
+        if (current.size() + incoming.length <= MAX_LOG_LINES) {
+            List<String> appended = new ArrayList<>(current.size() + incoming.length);
+            appended.addAll(current);
+            for (String line : incoming) {
+                appended.add(line);
+            }
+            return appended;
+        }
+
+        List<String> retained = new ArrayList<>(MAX_LOG_LINES);
+        retained.add(TRUNCATED_LOG_MARKER);
+        int incomingToKeep = Math.min(incoming.length, MAX_LOG_LINES - 1);
+        int currentToKeep = MAX_LOG_LINES - 1 - incomingToKeep;
+        int firstRetained = Math.max(0, current.size() - currentToKeep);
+        for (int index = firstRetained; index < current.size(); index++) {
+            retained.add(current.get(index));
+        }
+        for (int index = incoming.length - incomingToKeep; index < incoming.length; index++) {
+            retained.add(incoming[index]);
+        }
+        return retained;
     }
 }
