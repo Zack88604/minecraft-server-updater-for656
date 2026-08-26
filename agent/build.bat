@@ -53,7 +53,16 @@ if not exist "%RUNTIME_SPEC%" (
 echo [build] Compiling core + gui/javafx helper...
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 mkdir "%BUILD_DIR%"
-dir /s /b "%SRC_DIR%\*.java" > "%BUILD_DIR%\sources.txt"
+REM Response-file paths must be quoted (paths may contain spaces) AND use
+REM forward slashes: javac treats `\` as an escape character in @argfiles,
+REM so backslashes inside quoted paths get silently stripped. Write each
+REM .java path quoted, with backslashes converted to forward slashes.
+(
+    for /r "%SRC_DIR%" %%f in (*.java) do (
+        set "_src=%%f"
+        echo "!_src:\=/!"
+    )
+) > "%BUILD_DIR%\sources.txt"
 javac --release 17 -encoding UTF-8 -cp "lib\javafx\*" -d "%BUILD_DIR%" @"%BUILD_DIR%\sources.txt"
 if %ERRORLEVEL% neq 0 (
     echo [build] Compilation failed!

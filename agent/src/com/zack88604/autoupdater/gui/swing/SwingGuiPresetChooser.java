@@ -2,6 +2,7 @@ package com.zack88604.autoupdater.gui.swing;
 
 import com.zack88604.autoupdater.gui.preset.GuiPreset;
 import com.zack88604.autoupdater.gui.preset.GuiPresetSelection;
+import com.zack88604.autoupdater.gui.preset.ServerGuiPresetOffer;
 
 import javax.swing.BorderFactory;
 import javax.swing.JCheckBox;
