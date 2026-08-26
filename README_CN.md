@@ -18,7 +18,7 @@
 | 组件 | 职责 |
 |------|------|
 | **服务端** (Python/Flask, Docker) | 托管文件清单与资源下载的 REST API。 |
-| **Agent** (Java, `-javaagent`) | Minecraft 启动时加载 — 检查更新、显示内建 JavaFX GUI（隔离 helper JVM，Swing 自动回退）、同步文件，完成后启动游戏。 |
+| **Agent** (Java, `-javaagent`) | Minecraft 启动时加载 — 检查更新、准备内建 JavaFX GUI（隔离 helper JVM，Swing 自动回退）、同步文件，完成后启动游戏。 |
 
 ### 双 JAR 设计（安全自更新）
 
@@ -38,10 +38,15 @@ JavaFX 运行时是**自动供应的**。核心 JAR 内嵌 `javafx-runtime-spec.
 当前平台的精确版本、模块 JAR、大小与 SHA-256 哈希。每次启动 agent 会：
 
 1. 依据该 spec 校验本地 `javafx-runtime/<version>/` 目录。
-2. 若缺失或损坏，且平台/JDK 支持（JDK 17+），后台修复会从 Maven Central
-   （`org.openjfx`，默认 `https://repo1.maven.org/maven2`）下载 JAR 并原子安装。
-3. 修复期间当前会话**留在 Swing** — 下载慢或失败都不会阻塞 Minecraft 启动；
-   运行时将在下次启动时就绪。
+2. 若缺失或损坏，且平台/JDK 支持（JDK 17+），**预检（preflight）**会在
+   Minecraft 更新之前从 Maven Central（`org.openjfx`，默认
+   `https://repo1.maven.org/maven2`）下载 JAR 并原子安装 — 在当前会话停留在
+   Swing 的同时，在 GUI 中显示真实进度。
+3. 预检**先于** Minecraft 更新运行，由 **10 秒停滞看门狗**约束，而不是总下载
+   预算：只要有真实进展（字节、构件完成、校验、安装）持续到达，即使超过 30 秒
+   或 60 秒也会继续等待；只有连续 10 秒毫无进展才算停滞 — 此时取消下载并在
+   Swing 上继续，因此下载慢或失败都不会阻塞 Minecraft 启动。修复完成后，
+   运行时将在**下次**启动时可用。
 
 Swing 始终是自动回退：运行时缺失、JDK 过旧、平台不支持，或 helper JVM 无法启动、
 崩溃、卡死时，更新器会用最新快照在 Swing 上重建同一个窗口。
@@ -58,7 +63,7 @@ sequenceDiagram
     L->>L: 存在 .new 则替换核心 JAR
     L->>A: 加载 UpdateAgent_core.jar 并委托
     A->>A: 解析配置、选择 GUI adapter
-    A->>A: 校验内建 JavaFX 运行时（缺失时自动修复）
+    A->>A: 运行时预检：校验 + 修复（显示进度，10s 停滞看门狗）
     A->>S: GET /api/v2/manifest
     A->>A: agent 自更新检查
     loop 每个受管文件
@@ -78,13 +83,13 @@ sequenceDiagram
 
 | 包 | 职责 |
 |----|------|
-| `application` | `UpdateController`（生命周期）、`UpdateService`（业务流程）、事件、状态归约与限频状态渲染。 |
+| `application` | `UpdateController`（生命周期）、`UpdateService`（业务流程）、事件、状态归约、限频状态渲染，以及 `UpdatePreflight`（更新前的可选工作）。 |
 | `domain` | `Manifest`、`FileEntry`、`UpdateResult`、`AgentArtifact`。 |
 | `infrastructure` | `FileManager`、`ServerClient`、JSON 解析。 |
 | `gui.api` | 与工具包无关的 GUI 契约与 Java helper 协议 API。 |
 | `gui.swing` | 内建 Swing adapter 与受信任的预设选择器。 |
 | `gui.preset` | V1 进程内与 V2 隔离 helper 预设的发现、校验与加载。 |
-| `gui.javafx` | 内建 JavaFX GUI：隔离 helper JVM、运行时校验与修复、JSONL 传输。 |
+| `gui.javafx` | 内建 JavaFX GUI：隔离 helper JVM、运行时校验与修复、`GuiRuntimePreflight`、JSONL 传输。 |
 | `bootstrap` / `config` | Agent 入口组装与配置优先级解析。 |
 
 ## 快速开始
@@ -215,7 +220,8 @@ JVM，Swing 自动回退）是默认实现；自定义工具包**无需改动更
 | `mc-update.server-gui-public-key` | *（空）* | 客户端固定的 Base64 X.509 Ed25519 公钥 |
 
 内建 JavaFX GUI 需要 JDK 17+，首次使用时从 Maven Central 下载 JavaFX 21 运行时
-（见上文「内建 JavaFX GUI」）。旧 JDK、离线机器与不支持的平台会自动留在 Swing —
+（见上文「内建 JavaFX GUI」）。下载以预检形式运行，在 Minecraft 更新前显示真实
+进度并受 10 秒停滞看门狗约束；旧 JDK、离线机器与不支持的平台会自动留在 Swing —
 可设置
 `mc-update.gui-adapter=com.zack88604.autoupdater.gui.swing.SwingGuiAdapterFactory`
 强制使用。
@@ -321,12 +327,12 @@ Ed25519 校验需要 Java 15 或更新版本；旧 JVM 会回退到 Swing。生�
         └── com/zack88604/autoupdater/
             ├── bootstrap/                # 组合根
             ├── config/                   # 配置优先级
-            ├── application/              # 更新流程、取消、UI 状态泵
+            ├── application/              # 更新流程、取消、UI 状态泵、预检
             ├── domain/                   # 清单值对象
             ├── infrastructure/           # 文件、HTTP、JSON
             └── gui/
                 ├── api/                  # 对外 GUI 与 helper 契约
-                ├── javafx/               # 内建 JavaFX GUI（helper JVM + 运行时管理）
+                ├── javafx/               # 内建 JavaFX GUI（helper JVM + 运行时管理 + 预检）
                 ├── swing/                # 内建回退 GUI
                 └── preset/               # V1/V2 外部预设运行时
 ```

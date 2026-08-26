@@ -104,7 +104,9 @@ public abstract class UpdateEvent {
     /** Whether an updater artifact or managed file is being downloaded. */
     public enum DownloadKind {
         MANAGED_FILE,
-        UPDATER
+        UPDATER,
+        /** An optional JavaFX UI runtime artifact (GUI preflight repair). */
+        GUI_RUNTIME
     }
 
     /** A snapshot of the active download, or its completion. */

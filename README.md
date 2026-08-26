@@ -18,7 +18,7 @@
 | Component | Role |
 |-----------|------|
 | **Server** (Python/Flask, Docker) | Hosts file manifests & resource downloads via a REST API. |
-| **Agent** (Java, `-javaagent`) | Loaded at Minecraft startup — checks for updates, shows an embedded JavaFX GUI (isolated helper JVM, automatic Swing fallback), syncs files, then lets the game launch. |
+| **Agent** (Java, `-javaagent`) | Loaded at Minecraft startup — checks for updates, prepares an embedded JavaFX GUI (isolated helper JVM, automatic Swing fallback), syncs files, then lets the game launch. |
 
 ### Two-JAR design (safe self-update)
 
@@ -41,11 +41,16 @@ SHA-256 hashes for the current platform. On every launch the agent:
 
 1. Verifies the local `javafx-runtime/<version>/` directory against that spec.
 2. If it is missing or corrupt and the platform/JDK can host it (JDK 17+), a
-   background repair downloads the jars from Maven Central (`org.openjfx`,
-   default `https://repo1.maven.org/maven2`) and atomically installs them.
-3. The current session **stays on Swing** while the repair runs — a slow or
-   failed download never blocks Minecraft from launching; the runtime is ready
-   for the next launch.
+   **preflight** downloads the jars from Maven Central (`org.openjfx`, default
+   `https://repo1.maven.org/maven2`) and atomically installs them — with real
+   progress shown in the GUI while the session stays on Swing.
+3. The preflight runs **before** the Minecraft update and is bounded by a
+   **10-second stall watchdog**, not a download budget: as long as real progress
+   (bytes, artifact completion, verification, install) keeps arriving, it waits
+   even past 30 s or 60 s. Only 10 consecutive seconds of silence count as a
+   stall — which cancels the download and continues on Swing, so a slow or
+   failed download never blocks Minecraft from launching. A finished repair
+   makes the runtime usable on the **next** launch.
 
 Swing is always the automatic fallback: when the runtime is missing, the JDK is
 too old, the platform is unsupported, or the helper JVM cannot start, crashes,
@@ -63,7 +68,7 @@ sequenceDiagram
     L->>L: swap core JAR if .new exists
     L->>A: load UpdateAgent_core.jar + delegate
     A->>A: resolve config, pick GUI adapter
-    A->>A: verify embedded JavaFX runtime (auto-repair if missing)
+    A->>A: runtime preflight: verify + repair (progress, 10s stall watchdog)
     A->>S: GET /api/v2/manifest
     A->>A: agent self-update check
     loop each managed file
@@ -83,13 +88,13 @@ The core agent is composed of small layers (all under `com.zack88604.autoupdater
 
 | Package | Responsibility |
 |---------|----------------|
-| `application` | `UpdateController` (lifecycle), `UpdateService` (business flow), events, state reduction, and rate-limited state rendering. |
+| `application` | `UpdateController` (lifecycle), `UpdateService` (business flow), events, state reduction, rate-limited state rendering, and `UpdatePreflight` (optional work before the update). |
 | `domain` | `Manifest`, `FileEntry`, `UpdateResult`, `AgentArtifact`. |
 | `infrastructure` | `FileManager`, `ServerClient`, JSON parsing. |
 | `gui.api` | Toolkit-neutral GUI contracts and Java-helper protocol APIs. |
 | `gui.swing` | Built-in Swing adapter and trusted preset chooser. |
 | `gui.preset` | V1 in-process and V2 isolated helper preset discovery, validation, and loading. |
-| `gui.javafx` | Embedded JavaFX GUI: isolated helper JVM, runtime verification & repair, JSONL transport. |
+| `gui.javafx` | Embedded JavaFX GUI: isolated helper JVM, runtime verification & repair, `GuiRuntimePreflight`, JSONL transport. |
 | `bootstrap` / `config` | Agent entry point composition and configuration resolution. |
 
 ## Quick Start
@@ -223,8 +228,10 @@ Configuration is resolved in this order (normal mode):
 | `mc-update.server-gui-public-key` | *(empty)* | Base64 X.509 Ed25519 public key pinned by this client |
 
 The built-in JavaFX GUI needs JDK 17+ and downloads its JavaFX 21 runtime from
-Maven Central on first use (see *Embedded JavaFX GUI*). Older JDKs, offline
-machines, and unsupported platforms automatically stay on Swing — set
+Maven Central on first use (see *Embedded JavaFX GUI*). The download runs as a
+preflight with visible progress and a 10-second stall watchdog before the
+Minecraft update; older JDKs, offline machines, and unsupported platforms
+automatically stay on Swing — set
 `mc-update.gui-adapter=com.zack88604.autoupdater.gui.swing.SwingGuiAdapterFactory`
 to force it.
 
@@ -334,12 +341,12 @@ cleaned up. Defaults: `managed_paths: ["*"]`, `excluded_paths: []`.
         └── com/zack88604/autoupdater/
             ├── bootstrap/                # composition root
             ├── config/                   # configuration precedence
-            ├── application/              # update flow, cancellation, UI state pump
+            ├── application/              # update flow, cancellation, UI state pump, preflight
             ├── domain/                   # manifest value objects
             ├── infrastructure/           # files, HTTP, JSON
             └── gui/
                 ├── api/                  # public GUI and helper contracts
-                ├── javafx/               # embedded JavaFX GUI (helper JVM + runtime manager)
+                ├── javafx/               # embedded JavaFX GUI (helper JVM + runtime manager + preflight)
                 ├── swing/                # built-in fallback GUI
                 └── preset/               # V1/V2 external preset runtime
 ```

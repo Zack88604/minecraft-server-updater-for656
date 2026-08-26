@@ -9,6 +9,7 @@ import com.zack88604.autoupdater.gui.api.GuiAdapterContext;
 import com.zack88604.autoupdater.gui.api.GuiAdapterFactory;
 import com.zack88604.autoupdater.gui.api.JavaHelperGuiPresetFactory;
 import com.zack88604.autoupdater.gui.api.JavaHelperLaunchSpec;
+import com.zack88604.autoupdater.gui.javafx.GuiRuntimePreflight;
 import com.zack88604.autoupdater.gui.javafx.JavaFxGuiAdapterFactory;
 import com.zack88604.autoupdater.gui.javafx.JavaFxRuntimeManager;
 import com.zack88604.autoupdater.gui.preset.ExternalGuiAdapterFactoryLoader;
@@ -63,9 +64,14 @@ public final class AgentBootstrap {
         CountDownLatch launchLatch = new CountDownLatch(1);
         UpdateService service = new UpdateService(config.getGameDir(),
                 parseServerList(config.getServer()));
+        AdapterSelection selection = selectAdapter(config);
         UpdateController controller = new UpdateController(service,
-                createGuiAdapter(config),
-                launchLatch, config.isDebug());
+                selection.adapter(), launchLatch, config.isDebug());
+        if (selection.needsRuntimePreflight()) {
+            // Default Swing + JavaFX runtime not READY: prepare the runtime with
+            // visible progress before the Minecraft update starts (2B preflight).
+            controller.setPreflight(GuiRuntimePreflight.create());
+        }
         controller.start();
 
         try {
@@ -75,7 +81,16 @@ public final class AgentBootstrap {
         }
     }
 
+    /** Keep {@code createGuiAdapter} returning a plain adapter for callers that
+     *  only need the adapter itself (tests); the composition root uses
+     *  {@link #selectAdapter} to also learn whether a runtime preflight is needed. */
     private static GuiAdapter createGuiAdapter(AgentConfig config) {
+        return selectAdapter(config).adapter();
+    }
+
+    /** Choose the GUI adapter for this session plus whether it needs the JavaFX
+     *  runtime preflight before the update (2B). */
+    private static AdapterSelection selectAdapter(AgentConfig config) {
         GuiPresetStore presetStore = new GuiPresetStore(config.getGameDir());
         GuiAdapterContext context = new GuiAdapterContext(config.getGameDir(),
                 presetStore.getConfigurationDirectory().getAbsolutePath(), config.isDebug());
@@ -84,7 +99,8 @@ public final class AgentBootstrap {
         // compiled into the updater core.
         String factoryClassName = config.getGuiAdapterFactoryClassName();
         if (factoryClassName != null) {
-            return createConfiguredAdapter(factoryClassName, context);
+            return new AdapterSelection(createConfiguredAdapter(factoryClassName, context),
+                    false);
         }
 
         try {
@@ -104,7 +120,7 @@ public final class AgentBootstrap {
             try {
                 GuiAdapter adapter = createPresetAdapter(preset, context);
                 persistSelection(presetStore, selection);
-                return adapter;
+                return new AdapterSelection(adapter, false);
             } catch (IOException | RuntimeException | LinkageError error) {
                 clearSelection(presetStore);
                 SwingGuiPresetChooser.showLoadFailure(preset);
@@ -208,22 +224,42 @@ public final class AgentBootstrap {
 
     /**
      * Built-in GUI adapter: the embedded JavaFX GUI when its runtime is READY,
-     * otherwise Swing. Phase 2A makes "this session Swing, next session JavaFX"
-     * work end-to-end: when the runtime is not READY the session stays on Swing
-     * and an asynchronous repair prepares the runtime for the NEXT launch. The
-     * repair must be started here — not only in {@code JavaFxHelperProcess.launch},
-     * which is reached only when the JavaFX adapter is selected — because the
-     * default selection path (no {@code gui-adapter} config) never instantiates
-     * the JavaFX adapter under Swing, so without this call nothing would ever
-     * download the missing runtime.
+     * otherwise Swing. When the runtime is not READY the session stays on Swing
+     * and {@link AdapterSelection#needsRuntimePreflight()} reports that the
+     * composition root must inject {@link GuiRuntimePreflight} — which repairs
+     * the runtime with visible progress before the Minecraft update starts (2B).
+     * No fire-and-forget background repair runs here any more: the repair entry
+     * is the preflight, so 2A's background repair and the 2B gate can never
+     * double-trigger.
      */
-    private static GuiAdapter createBuiltInAdapter(GuiAdapterContext context) {
+    private static AdapterSelection createBuiltInAdapter(GuiAdapterContext context) {
         if (JavaFxRuntimeManager.verifyLocal()
                 == JavaFxRuntimeManager.RuntimeStatus.READY) {
-            return new JavaFxGuiAdapterFactory().create(context);
+            return new AdapterSelection(new JavaFxGuiAdapterFactory().create(context), false);
         }
-        JavaFxRuntimeManager.ensureReadyAsync();
-        return new SwingGuiAdapterFactory().create(context);
+        return new AdapterSelection(new SwingGuiAdapterFactory().create(context), true);
+    }
+
+    /** One session's GUI adapter choice plus whether the composition root must
+     *  run the JavaFX runtime preflight (only the built-in Swing path when the
+     *  runtime is not READY ever needs it). */
+    private static final class AdapterSelection {
+
+        private final GuiAdapter adapter;
+        private final boolean needsRuntimePreflight;
+
+        private AdapterSelection(GuiAdapter adapter, boolean needsRuntimePreflight) {
+            this.adapter = adapter;
+            this.needsRuntimePreflight = needsRuntimePreflight;
+        }
+
+        GuiAdapter adapter() {
+            return adapter;
+        }
+
+        boolean needsRuntimePreflight() {
+            return needsRuntimePreflight;
+        }
     }
 
     private static void persistSelection(GuiPresetStore presetStore,

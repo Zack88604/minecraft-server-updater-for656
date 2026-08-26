@@ -71,14 +71,26 @@ public class Launcher {
             }
 
             // 3. Load core JAR and delegate to UpdateAgent.premain()
-            try (URLClassLoader cl = new URLClassLoader(
+            // NOTE: do NOT close this classloader. AgentBootstrap starts a daemon
+            // background thread (JavaFX runtime repair) that outlives premain()
+            // and still needs this loader to resolve classes/resources (the core
+            // JAR's embedded javafx-runtime-spec.json, RepairResult, ...). Closing
+            // it here would race the repair thread — if a download runs longer
+            // than the update flow, the repair crashes mid-install and the runtime
+            // is never committed. The loader is intentionally leaked; the JVM
+            // reclaims it on exit.
+            URLClassLoader cl = new URLClassLoader(
                     new URL[]{coreJar.toURI().toURL()},
                     Launcher.class.getClassLoader()
-            )) {
+            );
+            try {
                 Class<?> agentClass = cl.loadClass("UpdateAgent");
                 Method premain = agentClass.getMethod("premain", String.class,
                         Instrumentation.class);
                 premain.invoke(null, args, inst);
+            } catch (Exception e) {
+                cl.close();
+                throw e;
             }
 
         } catch (Exception e) {

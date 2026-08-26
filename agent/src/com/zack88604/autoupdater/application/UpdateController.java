@@ -34,6 +34,7 @@ public final class UpdateController implements UpdateViewActions {
 
     private UpdateUiState state = UpdateUiState.initial();
     private volatile UpdateView view;
+    private volatile UpdatePreflight preflight;
     private volatile ClosePolicy closePolicy = ClosePolicy.CONFIRM;
     private boolean started;
     private boolean confirmationPaused;
@@ -46,6 +47,15 @@ public final class UpdateController implements UpdateViewActions {
         this.launchLatch = Objects.requireNonNull(launchLatch, "launchLatch");
         this.debug = debug;
         stateRenderer = new LatestStateRenderer(guiAdapter.dispatcher(), this::renderState);
+    }
+
+    /**
+     * Set an optional preflight to run on the worker thread before the update
+     * use case starts. Must be called before {@link #start()}. A null preflight
+     * keeps the existing behavior byte-for-byte identical.
+     */
+    public void setPreflight(UpdatePreflight preflight) {
+        this.preflight = preflight;
     }
 
     /** Create, open, and begin driving the update view exactly once. */
@@ -193,6 +203,7 @@ public final class UpdateController implements UpdateViewActions {
     private void startWorker() {
         Thread worker = new Thread(() -> {
             try {
+                runPreflight();
                 UpdateResult result = service.run(this::onUpdateEvent, executionControl);
                 onUpdateEvent(new UpdateEvent.Completed(result));
             } catch (UpdateExecutionControl.CancelledException ignored) {
@@ -206,6 +217,24 @@ public final class UpdateController implements UpdateViewActions {
         }, "update-worker");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    /**
+     * Run the optional preflight on the worker thread, before the update use
+     * case. A preflight is optional GUI infrastructure (never part of the
+     * Minecraft update), so even an unexpected Throwable must never become an
+     * updater {@link UpdateEvent.Failed}; it is logged and the flow continues.
+     */
+    private void runPreflight() {
+        UpdatePreflight p = preflight;
+        if (p == null) {
+            return;
+        }
+        try {
+            p.run(this::onUpdateEvent);
+        } catch (Throwable throwable) {
+            throwable.printStackTrace();
+        }
     }
 
     /** Receive a business event on the update worker and schedule its latest state. */

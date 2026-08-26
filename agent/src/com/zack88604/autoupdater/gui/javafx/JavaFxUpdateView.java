@@ -329,7 +329,15 @@ final class JavaFxUpdateView implements UpdateView {
             applyWindowHeight();
             return;
         }
-        if (isUpdaterDownload(state)) {
+        if (isGuiRuntimeDownload(state)) {
+            // A JavaFX UI runtime download is a sub-state of PREPARING, never a
+            // DOWNLOADING phase: it is optional GUI infrastructure being prepared
+            // before the real update (2B), so it must not shift the phase art.
+            setPhase(UpdatePhase.PREPARING);
+            lblStatus.setText("Preparing JavaFX UI runtime…");
+            lblDescription.setText("Downloading JavaFX runtime");
+            showStatusImage(IMG_PREPARING);
+        } else if (isUpdaterDownload(state)) {
             // The updater self-update never exposes "agent" jargon in the normal
             // UI — it stays a sub-state of PREPARING with its own illustration.
             setPhase(UpdatePhase.PREPARING);
@@ -355,6 +363,11 @@ final class JavaFxUpdateView implements UpdateView {
     private static boolean isUpdaterDownload(UpdateUiState state) {
         DownloadProgress dl = state.getDownloadProgress();
         return dl.isActive() && dl.getKind() == DownloadProgress.Kind.UPDATER;
+    }
+
+    private static boolean isGuiRuntimeDownload(UpdateUiState state) {
+        DownloadProgress dl = state.getDownloadProgress();
+        return dl.isActive() && dl.getKind() == DownloadProgress.Kind.GUI_RUNTIME;
     }
 
     /** Present the server state (inside Details). */

@@ -85,9 +85,17 @@ public final class UpdateStateReducer {
         if (!event.isActive()) {
             return DownloadProgress.inactive();
         }
-        DownloadProgress.Kind kind = event.getKind() == UpdateEvent.DownloadKind.UPDATER
-                ? DownloadProgress.Kind.UPDATER
-                : DownloadProgress.Kind.FILE;
+        DownloadProgress.Kind kind;
+        switch (event.getKind()) {
+            case UPDATER:
+                kind = DownloadProgress.Kind.UPDATER;
+                break;
+            case GUI_RUNTIME:
+                kind = DownloadProgress.Kind.GUI_RUNTIME;
+                break;
+            default:
+                kind = DownloadProgress.Kind.FILE;
+        }
         return DownloadProgress.active(event.getResource(), kind, event.getDownloadedBytes(),
                 event.getTotalBytes(), event.getBytesPerSecond());
     }

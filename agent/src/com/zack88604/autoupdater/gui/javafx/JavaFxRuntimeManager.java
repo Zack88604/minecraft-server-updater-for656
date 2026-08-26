@@ -19,6 +19,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -40,9 +41,9 @@ import java.util.concurrent.atomic.AtomicReference;
  *       before any helper JVM is started.</li>
  *   <li>{@link #ensureReady()} is the online verify + repair entry. It returns a
  *       distinct {@link RepairResult} (READY / REPAIRED / MISSING / CORRUPTED /
- *       UNSUPPORTED / DOWNLOAD_FAILED / IO_ERROR) so callers can distinguish
- *       "already usable" from "repaired" from "cannot be supported" from each
- *       failure class.</li>
+ *       UNSUPPORTED / DOWNLOAD_FAILED / IO_ERROR / CANCELLED) so callers can
+ *       distinguish "already usable" from "repaired" from "cannot be supported"
+ *       from each failure class from "cooperatively cancelled".</li>
  *   <li>Downloads use the embedded spec's fixed SHA-256 as the only trusted hash
  *       (no remote {@code .sha1}/{@code .md5}, no trust in a remote checksum), the
  *       spec's {@code size} as a second check (Content-Length early check + final
@@ -94,7 +95,84 @@ public final class JavaFxRuntimeManager {
         /** Network / HTTP / size / hash failure during download. */
         DOWNLOAD_FAILED,
         /** Local filesystem / permission failure during install. */
-        IO_ERROR
+        IO_ERROR,
+        /** The repair was cooperatively cancelled before reaching a terminal
+         *  result (the manager knows only that it was cancelled, never why). */
+        CANCELLED
+    }
+
+    /** A distinct step of one online repair, reported through {@link RepairProgress}. */
+    enum RepairPhase {
+        /** A new artifact download has started. */
+        DOWNLOADING,
+        /** A downloaded artifact is being verified against the spec. */
+        VERIFYING,
+        /** A verified artifact is being installed into its formal location. */
+        INSTALLING,
+        /** The whole runtime is being committed (metadata + final verification). */
+        COMMITTING
+    }
+
+    /**
+     * Toolkit-independent progress sink for one online repair. A caller may pass
+     * {@code null}; the manager then reports nothing. Byte callbacks fire on every
+     * real buffer written (never on timer ticks or UI repaints); phase callbacks
+     * fire on each distinct {@link RepairPhase} transition.
+     */
+    interface RepairProgress {
+        /** A real byte-count increase on one artifact download. */
+        void onBytes(String artifact, long downloadedBytes, long totalBytes);
+
+        /** Entering a distinct repair step. */
+        void onPhase(RepairPhase phase, String artifact);
+    }
+
+    /**
+     * Cooperative cancellation for one repair. {@link #cancel()} sets the flag and
+     * best-effort disconnects the in-flight HTTP connection so a blocked read
+     * unblocks; the download loop also observes {@link #isCancelled()} between
+     * buffers. Never stops or force-kills threads.
+     */
+    static final class CancellationToken {
+        private final AtomicBoolean cancelled = new AtomicBoolean();
+        private volatile HttpURLConnection currentConnection;
+        private volatile InputStream currentStream;
+
+        boolean isCancelled() {
+            return cancelled.get();
+        }
+
+        /** Request cancellation: set the flag and best-effort unblock an in-flight
+         *  read (closing the stream / disconnecting the socket makes a blocked
+         *  {@code read()} throw; the download loop also observes the flag between
+         *  buffers). Never stops or force-kills threads. */
+        void cancel() {
+            cancelled.set(true);
+            InputStream stream = currentStream;
+            if (stream != null) {
+                try {
+                    stream.close();
+                } catch (IOException ignored) {
+                    // Best effort — the connection disconnect + flag also apply.
+                }
+            }
+            HttpURLConnection connection = currentConnection;
+            if (connection != null) {
+                try {
+                    connection.disconnect();
+                } catch (RuntimeException ignored) {
+                    // Best effort — the read loop also observes the flag.
+                }
+            }
+        }
+
+        void setCurrentConnection(HttpURLConnection connection) {
+            currentConnection = connection;
+        }
+
+        void setCurrentStream(InputStream stream) {
+            currentStream = stream;
+        }
     }
 
     /** Maven artifact source; default Maven Central, swappable in tests. */
@@ -262,6 +340,24 @@ public final class JavaFxRuntimeManager {
      * with identical, spec-verified content.
      */
     static RepairResult ensureReady() {
+        return ensureReady(null, null);
+    }
+
+    /**
+     * Verify the runtime and, when it is missing or corrupt, repair it over the
+     * network while reporting real progress and honoring cooperative
+     * cancellation. {@code progress} and {@code token} are optional (may be
+     * null): the no-arg {@link #ensureReady()} and {@code ensureReadyAsync()}
+     * keep working unchanged.
+     *
+     * <p>A cancelled repair returns {@link RepairResult#CANCELLED} without
+     * writing {@code runtime.json}/{@code .installed}, so a cancelled repair can
+     * never be mistaken for READY on the next launch.</p>
+     */
+    static RepairResult ensureReady(RepairProgress progress, CancellationToken token) {
+        if (isCancelled(token)) {
+            return RepairResult.CANCELLED;
+        }
         JavaFxSpec spec = loadEmbeddedSpec();
         if (spec == null) {
             return RepairResult.MISSING;
@@ -277,10 +373,24 @@ public final class JavaFxRuntimeManager {
                 break;   // → repair below
         }
         try {
-            return repair(spec);
+            return repair(spec, progress, token);
         } catch (IOException e) {
+            if (isCancelled(token)) {
+                return RepairResult.CANCELLED;
+            }
             System.err.println("[javafx] Runtime repair local IO failure: " + e);
             return RepairResult.IO_ERROR;
+        }
+    }
+
+    private static boolean isCancelled(CancellationToken token) {
+        return token != null && token.isCancelled();
+    }
+
+    private static void notifyPhase(RepairProgress progress, RepairPhase phase,
+                                    String artifact) {
+        if (progress != null) {
+            progress.onPhase(phase, artifact);
         }
     }
 
@@ -318,7 +428,8 @@ public final class JavaFxRuntimeManager {
     }
 
     /** Install every artifact for the current platform, then write metadata. */
-    private static RepairResult repair(JavaFxSpec spec) throws IOException {
+    private static RepairResult repair(JavaFxSpec spec, RepairProgress progress,
+                                       CancellationToken token) throws IOException {
         String cls = platformClassifier();
         File runtimeDir = runtimeDir();
         if (runtimeDir == null) {
@@ -332,12 +443,17 @@ public final class JavaFxRuntimeManager {
             if (!cls.equals(a.classifier)) {
                 continue;
             }
+            if (isCancelled(token)) {
+                return RepairResult.CANCELLED;
+            }
             File jar = new File(versionDir, a.file);
             if (isValidArtifact(jar, a)) {
                 continue;   // artifact-granularity: only re-fetch what is wrong
             }
-            if (!downloadAndInstall(a, versionDir, spec)) {
-                return RepairResult.DOWNLOAD_FAILED;
+            notifyPhase(progress, RepairPhase.DOWNLOADING, a.file);
+            if (!downloadAndInstall(a, versionDir, spec, progress, token)) {
+                return isCancelled(token) ? RepairResult.CANCELLED
+                        : RepairResult.DOWNLOAD_FAILED;
             }
         }
 
@@ -347,6 +463,10 @@ public final class JavaFxRuntimeManager {
         // verification is not READY the commit is revoked (marker + metadata
         // removed) and CORRUPTED is returned: a broken install must never leave a
         // `.installed` that a later verifyLocal() could mistake for READY.
+        if (isCancelled(token)) {
+            return RepairResult.CANCELLED;
+        }
+        notifyPhase(progress, RepairPhase.COMMITTING, null);
         writeMetadata(runtimeDir, spec, cls);
         if (finalVerifyResult() != RuntimeStatus.READY) {
             revokeInstall(runtimeDir);
@@ -368,10 +488,12 @@ public final class JavaFxRuntimeManager {
     }
 
     /** Download one artifact to a unique temp file, verify, then atomically
-     *  replace the formal jar. Returns false (DOWNLOAD_FAILED) on any
-     *  network/HTTP/size/hash problem; throws IOException (IO_ERROR) on a local
-     *  filesystem problem. The temp file is removed on every failure. */
-    private static boolean downloadAndInstall(Artifact a, File versionDir, JavaFxSpec spec)
+     *  replace the formal jar. Returns false (DOWNLOAD_FAILED / CANCELLED) on any
+     *  network/HTTP/size/hash problem or on cancellation; throws IOException
+     *  (IO_ERROR) on a local filesystem problem. The temp file is removed on
+     *  every failure, so a cancelled download never leaves a partial temp file. */
+    private static boolean downloadAndInstall(Artifact a, File versionDir, JavaFxSpec spec,
+                                              RepairProgress progress, CancellationToken token)
             throws IOException {
         File temp = new File(versionDir, ".mc-update-runtime-" + UUID.randomUUID() + ".tmp");
         // Create the temp before any network I/O: a permission / read-only / disk
@@ -381,11 +503,16 @@ public final class JavaFxRuntimeManager {
         boolean installed = false;
         try {
             URL url = repository.artifactUrl(spec.version, a);
-            if (!downloadTo(url, temp, a)) {
+            if (!downloadTo(url, temp, a, progress, token)) {
+                return false;
+            }
+            notifyPhase(progress, RepairPhase.VERIFYING, a.file);
+            if (isCancelled(token)) {
                 return false;
             }
             moveReplacing(temp, new File(versionDir, a.file));
             installed = true;
+            notifyPhase(progress, RepairPhase.INSTALLING, a.file);
             return true;
         } finally {
             if (!installed) {
@@ -396,14 +523,18 @@ public final class JavaFxRuntimeManager {
 
     /** Stream one artifact to {@code temp}, verifying Content-Length (early),
      *  final byte count and the spec's fixed SHA-256 (authoritative). Returns
-     *  false on any download-side failure (network / HTTP / size / hash);
-     *  throws IOException on a local filesystem failure (temp write). Never
-     *  writes the formal jar. */
-    private static boolean downloadTo(URL url, File temp, Artifact a)
+     *  false on any download-side failure (network / HTTP / size / hash /
+     *  cancellation); throws IOException on a local filesystem failure (temp
+     *  write). Never writes the formal jar. */
+    private static boolean downloadTo(URL url, File temp, Artifact a,
+                                      RepairProgress progress, CancellationToken token)
             throws IOException {
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) url.openConnection();
+            if (token != null) {
+                token.setCurrentConnection(conn);   // lets cancel() unblock a read
+            }
             conn.setRequestMethod("GET");
             conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
             conn.setReadTimeout(READ_TIMEOUT_MS);
@@ -411,6 +542,10 @@ public final class JavaFxRuntimeManager {
             try {
                 code = conn.getResponseCode();
             } catch (IOException e) {
+                if (isCancelled(token)) {
+                    logDownloadFailure(url, "cancelled");
+                    return false;
+                }
                 // Connection refused / DNS / unreachable before any response.
                 logDownloadFailure(url, "cannot reach (" + e + ")");
                 return false;
@@ -437,12 +572,23 @@ public final class JavaFxRuntimeManager {
             long total = 0;
             try (InputStream in = conn.getInputStream();
                  FileOutputStream out = new FileOutputStream(temp)) {
+                if (token != null) {
+                    token.setCurrentStream(in);   // lets cancel() unblock a blocked read
+                }
                 byte[] buf = new byte[8192];
                 while (true) {
+                    if (isCancelled(token)) {
+                        logDownloadFailure(url, "cancelled");
+                        return false;
+                    }
                     int n;
                     try {
                         n = in.read(buf);
                     } catch (IOException e) {
+                        if (isCancelled(token)) {
+                            logDownloadFailure(url, "cancelled");
+                            return false;
+                        }
                         // Network-side interruption (drop / premature EOF) is a
                         // download failure; the caller cleans up the temp file.
                         logDownloadFailure(url, "interrupted (" + e + ")");
@@ -461,6 +607,9 @@ public final class JavaFxRuntimeManager {
                     }
                     md.update(buf, 0, n);
                     total += n;
+                    if (progress != null) {
+                        progress.onBytes(a.file, total, a.size);
+                    }
                 }
             }
             if (total != a.size) {
@@ -476,9 +625,17 @@ public final class JavaFxRuntimeManager {
         } catch (LocalWriteException e) {
             throw e;   // filesystem problem → IO_ERROR
         } catch (IOException e) {
+            if (isCancelled(token)) {
+                logDownloadFailure(url, "cancelled");
+                return false;
+            }
             logDownloadFailure(url, "download failed (" + e + ")");
             return false;
         } finally {
+            if (token != null) {
+                token.setCurrentConnection(null);
+                token.setCurrentStream(null);
+            }
             if (conn != null) {
                 conn.disconnect();
             }
