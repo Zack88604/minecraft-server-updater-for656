@@ -1,0 +1,14 @@
+# Build outputs
+UpdateAgent.jar
+UpdateAgent_core.jar
+build/
+build-test/
+
+# Test
+test/
+
+# Auto-downloaded JavaFX build jars (fetched by build.sh)
+lib/javafx/
+
+# Transient smoke-test artifacts
+test/smoke-*.txt
