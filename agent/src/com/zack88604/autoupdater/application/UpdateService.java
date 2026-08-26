@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.LongSupplier;
 
 /**
  * Synchronous update use case.
@@ -75,7 +76,7 @@ public final class UpdateService {
             activeTransaction = transaction;
         }
 
-        EventRelay relay = new EventRelay(listener, control);
+        EventRelay relay = new EventRelay(listener, control, System::nanoTime);
         try {
             ServerClient serverClient = new ServerClient(serverUrls, relay);
 
@@ -379,21 +380,37 @@ public final class UpdateService {
         return String.format("%.0f B/s", bytesPerSecond);
     }
 
-    private static final class EventRelay implements ServerClient.Listener {
+    /**
+     * Forward progress events from {@link UpdateService} to a {@link UpdateListener}.
+     * Package-private (not private) so the download-speed regression suite can drive
+     * {@link #onDownloadProgress} with an injected monotonic nano-clock and reproduce
+     * the coarse-clock bug deterministically.
+     */
+    static final class EventRelay implements ServerClient.Listener {
         private static final int LOG_BATCH_SIZE = 128;
+        /** Minimum elapsed time between fresh download-speed readings. The indicator
+         *  refreshes at most this often: bytes accumulate across the interval so each
+         *  reading is a stable average rather than a per-8 KiB-chunk flicker. */
+        private static final long SPEED_UPDATE_INTERVAL_NANOS = 500_000_000L;
 
         private final UpdateListener listener;
         private final UpdateExecutionControl control;
+        private final LongSupplier nanoTime;
         private final List<String> pendingLogs = new ArrayList<String>();
         private String resource;
         private UpdateEvent.DownloadKind downloadKind;
         private long expectedTotalBytes;
         private long lastDownloadBytes;
-        private long lastDownloadTime;
+        private long lastDownloadNanos;
+        private double lastEmittedSpeed;
 
-        private EventRelay(UpdateListener listener, UpdateExecutionControl control) {
+        /** @param nanoTime monotonic high-resolution clock; production passes
+         *  {@code System::nanoTime}. */
+        EventRelay(UpdateListener listener, UpdateExecutionControl control,
+                   LongSupplier nanoTime) {
             this.listener = listener;
             this.control = control;
+            this.nanoTime = nanoTime;
         }
 
         @Override
@@ -444,7 +461,8 @@ public final class UpdateService {
             this.downloadKind = kind;
             this.expectedTotalBytes = expectedTotalBytes;
             this.lastDownloadBytes = 0;
-            this.lastDownloadTime = System.currentTimeMillis();
+            this.lastDownloadNanos = nanoTime.getAsLong();
+            this.lastEmittedSpeed = 0;
             emit(UpdateEvent.DownloadProgressChanged.active(
                     resource, kind, expectedTotalBytes, 0, 0));
         }
@@ -455,7 +473,8 @@ public final class UpdateService {
             downloadKind = null;
             expectedTotalBytes = 0;
             lastDownloadBytes = 0;
-            lastDownloadTime = 0;
+            lastDownloadNanos = 0;
+            lastEmittedSpeed = 0;
         }
 
         @Override
@@ -471,13 +490,31 @@ public final class UpdateService {
         @Override
         public void onDownloadProgress(long totalBytes, long downloadedBytes) {
             long effectiveTotal = totalBytes > 0 ? totalBytes : expectedTotalBytes;
-            long now = System.currentTimeMillis();
-            long elapsed = now - lastDownloadTime;
-            long bytesDelta = downloadedBytes - lastDownloadBytes;
-            double bytesPerSecond = elapsed > 0
-                    ? Math.max(0, bytesDelta) * 1000.0 / elapsed : 0;
-            lastDownloadBytes = downloadedBytes;
-            lastDownloadTime = now;
+            boolean completed = downloadedBytes >= effectiveTotal;
+            long now = nanoTime.getAsLong();
+            long elapsedNanos = now - lastDownloadNanos;
+            // The measurement window is nanoseconds (System.nanoTime), not the coarse
+            // System.currentTimeMillis: back-to-back chunk callbacks on a fast
+            // connection used to collapse into a single 0ms window that pinned the
+            // displayed speed at 0 B/s (and silently dropped those bytes from the
+            // baseline). The injectable supplier is what lets the tests reproduce the
+            // same-millisecond scenario deterministically.
+            //
+            // The reading refreshes at most once per 0.5 s (SPEED_UPDATE_INTERVAL_NANOS):
+            // bytes accumulate across the interval, so each fresh value is a stable
+            // average, and the events in between re-emit the previous reading instead
+            // of flickering on every 8 KiB chunk callback. A completed download forces
+            // one final refresh so even a sub-interval (very fast) transfer still
+            // reports a real speed.
+            double bytesPerSecond = lastEmittedSpeed;
+            if (completed || elapsedNanos >= SPEED_UPDATE_INTERVAL_NANOS) {
+                bytesPerSecond = elapsedNanos > 0
+                        ? Math.max(0, downloadedBytes - lastDownloadBytes)
+                                * 1_000_000_000.0 / elapsedNanos : 0;
+                lastEmittedSpeed = bytesPerSecond;
+                lastDownloadBytes = downloadedBytes;
+                lastDownloadNanos = now;
+            }
             emit(UpdateEvent.DownloadProgressChanged.active(
                     resource, downloadKind, effectiveTotal, downloadedBytes, bytesPerSecond));
         }

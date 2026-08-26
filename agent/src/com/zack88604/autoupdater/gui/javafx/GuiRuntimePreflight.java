@@ -108,8 +108,11 @@ public final class GuiRuntimePreflight implements UpdatePreflight {
                 new JavaFxRuntimeManager.CancellationToken();
 
         JavaFxRuntimeManager.RepairProgress observer = new JavaFxRuntimeManager.RepairProgress() {
-            private long lastBytesTime;
+            /** Refresh the runtime-download speed at most once per 0.5 s. */
+            private static final long SPEED_UPDATE_INTERVAL_NANOS = 500_000_000L;
+            private long lastBytesNanos;
             private long lastBytes;
+            private double lastEmittedSpeed;
 
             @Override
             public void onBytes(String artifact, long downloadedBytes, long totalBytes) {
@@ -118,16 +121,28 @@ public final class GuiRuntimePreflight implements UpdatePreflight {
                 if (!active.get()) {
                     return;   // late event after terminal → drop
                 }
-                long now = clock.now();
-                double bytesPerSecond = 0;
-                if (lastBytesTime > 0 && downloadedBytes > lastBytes) {
-                    long elapsed = now - lastBytesTime;
-                    if (elapsed > 0) {
-                        bytesPerSecond = (downloadedBytes - lastBytes) * 1000.0 / elapsed;
-                    }
+                boolean completed = totalBytes > 0 && downloadedBytes >= totalBytes;
+                long nowNanos = System.nanoTime();
+                // System.nanoTime() (monotonic, sub-microsecond) instead of the
+                // coarse millis clock: back-to-back chunk callbacks on a fast
+                // connection no longer collapse into a 0ms window that would
+                // pin the runtime-download speed at 0 B/s. The reading refreshes
+                // at most every 0.5 s — bytes accumulate into a stable average,
+                // and a completed download forces one final refresh.
+                double bytesPerSecond = lastEmittedSpeed;
+                if (lastBytesNanos == 0) {
+                    // First callback: seed the measurement baseline; no window yet.
+                    lastBytes = downloadedBytes;
+                    lastBytesNanos = nowNanos;
+                } else if (downloadedBytes > lastBytes
+                        && (completed || nowNanos - lastBytesNanos
+                                >= SPEED_UPDATE_INTERVAL_NANOS)) {
+                    bytesPerSecond = (downloadedBytes - lastBytes)
+                            * 1_000_000_000.0 / (nowNanos - lastBytesNanos);
+                    lastEmittedSpeed = bytesPerSecond;
+                    lastBytes = downloadedBytes;
+                    lastBytesNanos = nowNanos;
                 }
-                lastBytes = downloadedBytes;
-                lastBytesTime = now;
                 listener.onUpdateEvent(UpdateEvent.DownloadProgressChanged.active(
                         artifact, UpdateEvent.DownloadKind.GUI_RUNTIME,
                         totalBytes, downloadedBytes, bytesPerSecond));
