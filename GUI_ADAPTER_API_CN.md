@@ -15,7 +15,13 @@
 7. [V2 Java helper 预设](#7-v2-java-helper-预设)
 
 > 可运行的参考实现位于 `com.zack88604.autoupdater.gui.swing`（内建 Swing adapter），
-> 为自己的工具包实现时照它来写即可。
+> 实现自有工具包时应复用其生命周期规则，而不是复制 Swing 专有代码。
+
+仓库位置：
+
+- 对外契约：`agent/src/com/zack88604/autoupdater/gui/api/`
+- 内建回退实现：`agent/src/com/zack88604/autoupdater/gui/swing/`
+- 预设发现与 V2 helper 运行时：`agent/src/com/zack88604/autoupdater/gui/preset/`
 
 ---
 
@@ -42,9 +48,12 @@ sequenceDiagram
     C->>S: 在 worker 线程运行
     loop 每个业务事件
         S-->>C: onUpdateEvent(event)
-        C->>C: reduce(event) → 新的 UpdateUiState
-        C->>A: dispatcher.dispatch { render(state) }
-        A->>V: render(state)
+        C->>C: reduce(event) → 最新 UpdateUiState
+        C->>C: 替换尚未渲染的状态
+    end
+    loop UI 刷新（最高约 20 FPS）
+        C->>A: dispatcher.dispatch { render(latestState) }
+        A->>V: render(latestState)
     end
     S-->>C: Completed / Failed
     C->>V: render(最终状态)
@@ -57,12 +66,14 @@ sequenceDiagram
 | 线程 | 在上面运行什么 |
 |------|----------------|
 | **Update worker** | `UpdateService.run(...)`——HTTP、哈希、下载、清理，发出 `UpdateEvent`。 |
-| **Controller** | 把每个事件规约为不可变 `UpdateUiState`，再调度一次渲染。 |
+| **Controller** | 把事件规约为不可变状态，只保留最新待渲染快照，并将渲染限频为最高约 20 FPS。 |
 | **你的 UI 线程** | 全部 `UpdateView` 方法——通过 `GuiAdapter.dispatcher()` 到达。 |
 
 - 更新核心**从不** import `javax.swing`、`javafx` 或 AWT。
 - 所有 `UpdateView` 调用（`open`、`render`、`close`）都经 `UiDispatcher` 在你的 UI
   线程上执行。
+- 不保证每个事件都对应一次渲染。每个状态都是完整替换；高负载时中间进度与日志快照
+  可能被合并。
 - 你的 adapter 只接收不可变的展示状态，并把关闭意图传回去，不要涉及网络、文件或
   进程操作。
 
@@ -124,6 +135,7 @@ adapter 提供 UI 线程桥接，并创建你的视图。
 package com.example.updategui;
 
 import com.zack88604.autoupdater.gui.api.*;
+import javax.swing.SwingUtilities;
 
 public final class MyGuiAdapter implements GuiAdapter {
 
@@ -225,8 +237,10 @@ public final class MyGuiView implements UpdateView {
 
 要点：
 
-- `render(state)` 给你的**始终是完整的新状态**——请勿根据旧文案推断业务状态，
-  或在视图里保留可变的更新器状态。
+- `render(state)` 给你的是**完整的最新状态**。高负载时可能跳过中间状态，不能根据
+  一连串渲染过的文案推断业务状态。
+- 仅保留展示或关闭策略所需的最新不可变状态；不要修改它，也不要把视图当作更新器
+  业务状态。
 - 只要返回可用的 `UiDispatcher`，`open` / `render` / `close` 都会在你的 UI 线程
   上执行。
 
@@ -401,7 +415,7 @@ void notifyWindowClosed();      // 原生窗口关闭完成
 | `UpdatePhase` | `getPhase()` | 当前阶段（见 4.9）。 |
 | `String` | `getStatus()` | 主文案，如 "Downloading: mods/x.jar"。 |
 | `String` | `getDescription()` | 次要文案（可为空）。 |
-| `List<String>` | `getLogLines()` | 按时间顺序的日志快照。 |
+| `List<String>` | `getLogLines()` | 按时间顺序的展示日志尾部。最多保留 250 行；被省略的早期内容以标记行代替。 |
 | `List<String>` | `getServerUrls()` | 按优先级排列的服务器列表。 |
 | `String` | `getCurrentServer()` | 当前服务器（选择前为 `null`）。 |
 | `int` | `getOverallProgressPercent()` | 总体进度 0–100。 |
@@ -412,7 +426,8 @@ void notifyWindowClosed();      // 原生窗口关闭完成
 | `String` | `getErrorMessage()` | 可安全展示的错误信息；无错误时为 `null`。 |
 
 构造辅助：`UpdateUiState.initial()`、`UpdateUiState.builder()`。在 `render(...)` 中
-**整体渲染整个对象**；把它视为不可变，调用返回后不要保留。
+**整体渲染整个对象**；把它视为不可变。视图可保留最新快照用于展示和关闭处理，
+但不得修改它或据此重建更新器状态。
 
 ### 4.9 `UpdatePhase`（枚举）
 
@@ -458,6 +473,7 @@ DownloadProgress.active(String path, Kind kind, long downloadedBytes,
   仅供展示设置使用。
 - **要**让所有 `UpdateView` 调用都经你的 `UiDispatcher` 在 UI 线程执行。
 - **要**把 `render(state)` 输入当作完整替换快照。
+- **要**保持渲染轻量；controller 可能跳过中间状态，以便在大规模清理时保持 UI 响应。
 - **不要**根据旧渲染文案推断业务状态。
 - **不要**在视图里保存可变的更新器状态。
 - **不要**用 `UpdateViewActions` 做关闭意图 / 原生关闭之外的事。
@@ -469,8 +485,10 @@ DownloadProgress.active(String path, Kind kind, long downloadedBytes,
 1. 启动服务器并生成清单（见 README 快速开始）。
 2. 指定一个游戏目录并选中你的 adapter。
 3. 设置 `mc-update.debug=true`，成功后窗口保持打开便于检查。
-4. 修改一个受管文件以触发 `DOWNLOADING`；从清单删除一项以触发 `CLEANING`；
-   运行中停掉服务器以验证故障转移与失败路径（确认 `EXIT_FAILURE` 时关闭窗口会
+4. 修改一个受管文件以触发 `DOWNLOADING`；从清单删除大量条目以触发 `CLEANING`；
+   清理繁忙时请求关闭，确认确认框仍保持响应。确认后必须在安全检查点取消、还原
+   本次更新修改的文件、启动 Minecraft 并关闭视图。
+5. 运行中停掉服务器以验证故障转移与失败路径（确认 `EXIT_FAILURE` 时关闭窗口会
    退出 JVM）。
 
 ---
@@ -479,8 +497,8 @@ DownloadProgress.active(String path, Kind kind, long downloadedBytes,
 
 当 GUI 需要 JavaFX、Compose Desktop 等不应进入 Minecraft JVM 的运行时时，使用
 V2 预设。用户接受外部代码风险提示后，更新器才会校验并解压运行时产物，然后启动
-独立的 Java 子进程。子进程只接收完整的 `UpdateUiState` 快照，并且只能传回标准的
-关闭动作。
+独立的 Java 子进程。子进程只接收完整的、最新的 `UpdateUiState` 快照，并且只能传回
+标准的关闭动作。
 
 V1 预设保持不变：省略 `preset-api` 或将其设为 `1`，并按前文实现
 `GuiAdapterFactory` 即可。

@@ -2,8 +2,16 @@
 
 > 通过自托管 HTTP API 与 Java Agent，在多台机器间保持 Minecraft 客户端资源同步更新。
 
-- [English](./README.md)
-- [GUI Adapter API 中文说明](./GUI_ADAPTER_API_CN.md) — 打造你自己的 GUI 工具包。
+- [English](README.md)
+- [GUI Adapter API](GUI_ADAPTER_API.md)
+- [GUI Adapter API 中文说明](GUI_ADAPTER_API_CN.md) — 开发自定义 GUI 预设。
+
+## 文档索引
+
+| 文件 | 面向对象 | 作用 |
+|------|----------|------|
+| `README.md` / `README_CN.md` | 运维人员与维护者 | 构建、部署、配置与仓库导航。 |
+| `GUI_ADAPTER_API.md` / `GUI_ADAPTER_API_CN.md` | GUI 开发者 | 对外 GUI 契约、V1 预设与 V2 隔离 Java helper 预设。 |
 
 ## 简介
 
@@ -50,41 +58,61 @@ sequenceDiagram
 
 | 包 | 职责 |
 |----|------|
-| `application` | `UpdateController`（生命周期）、`UpdateService`（业务流程）、事件与状态归约。 |
+| `application` | `UpdateController`（生命周期）、`UpdateService`（业务流程）、事件、状态归约与限频状态渲染。 |
 | `domain` | `Manifest`、`FileEntry`、`UpdateResult`、`AgentArtifact`。 |
 | `infrastructure` | `FileManager`、`ServerClient`、JSON 解析。 |
-| `gui.api` | 与工具包无关的 GUI 契约（自定义 GUI 需要实现的内容）。 |
-| `gui.swing` | 内建 Swing adapter。 |
-| `gui.preset` | 外部 GUI 预设的发现与选择。 |
-| `bootstrap` / `config` | Agent 入口组装与配置。 |
+| `gui.api` | 与工具包无关的 GUI 契约与 Java helper 协议 API。 |
+| `gui.swing` | 内建 Swing adapter 与受信任的预设选择器。 |
+| `gui.preset` | V1 进程内与 V2 隔离 helper 预设的发现、校验与加载。 |
+| `bootstrap` / `config` | Agent 入口组装与配置优先级解析。 |
 
 ## 快速开始
 
 ### 服务端
 
 ```bash
-# 从上级目录构建
-docker build -t mc-update-service -f Dockerfile .
+# 在仓库根目录先构建 agent
+bash agent/build.sh
 
-# 挂载文件存储目录运行
-docker run -d -p 25565:25565 -v /path/to/files:/data/files -v /path/to/agent:/data/agent --name mc-update mc-update-service
+# 创建持久化服务端数据，并放入当前 core JAR
+mkdir -p /srv/mc-update/files /srv/mc-update/agent
+cp agent/UpdateAgent_core.jar /srv/mc-update/agent/
 
-# 将 UpdateAgent_core.jar 放入 agent 目录
-cp UpdateAgent_core.jar /path/to/agent/
+# 在仓库根目录构建并启动服务端
+docker build -t mc-update-service .
+docker run -d -p 25565:25565 \
+  -v /srv/mc-update:/data \
+  --name mc-update mc-update-service
 
-# 将资源文件放入 /data/files 后生成清单
-docker exec mc-update python3 /app/generate_manifest.py --dir /data/files --out /data --agent-jar /data/agent/UpdateAgent_core.jar
+# 修改文件或 update-config.json 后重新生成清单
+docker exec mc-update python3 /app/generate_manifest.py \
+  --dir /data/files --out /data --agent-jar /data/agent/UpdateAgent_core.jar
 ```
 
 ### Agent
 
 ```bash
-cd agent
-./build.sh                              # Windows 用 build.bat
-./setup-agent.sh ~/.minecraft/versions/1.20.1 http://your-server:25565
+# Linux/macOS（需要带 javac 的 JDK）
+bash agent/build.sh
+bash agent/setup-agent.sh ~/.minecraft/versions/1.20.1 http://your-server:25565
+
+# Windows
+agent\build.bat
+agent\setup-agent.bat C:\path\to\instance http://your-server:25565
 ```
 
 安装脚本会将服务器配置写入游戏目录下的 `mc-update.properties`，并向启动器 JVM 参数追加 `-javaagent:<path>/UpdateAgent.jar`。
+
+更新器拥有的运行时文件：
+
+```text
+<game-dir>/
+├── mc-update.properties                 # 持久化 server/debug/adapter 设置
+└── .mc-update/
+    ├── gui-selection.properties          # 可选的已记住 GUI 选择
+    ├── gui-presets/                      # 外部预设 JAR
+    └── gui-runtimes/                     # 已校验的 V2 helper 运行时解压目录
+```
 
 ## API
 
@@ -105,7 +133,7 @@ cd agent
 | 方式 | 做法 | 适用场景 |
 |------|------|----------|
 | **编译进核心 + 属性** | 把工厂编译进核心 JAR，配置 `mc-update.gui-adapter=<类名>` | 你维护/重新构建 agent |
-| **外部预设** | 把一个 JAR 放进 `.mc-update/gui-presets/`，首次启动时选择 | 独立分发 GUI，无需重构建 agent |
+| **外部预设** | 把 V1 adapter JAR 或 V2 Java-helper JAR 放进 `.mc-update/gui-presets/`，首次启动时选择 | 独立分发 GUI，无需重构建 agent |
 
 完整教程与 API 参考见 [GUI Adapter API](GUI_ADAPTER_API_CN.md)。
 
@@ -159,6 +187,9 @@ server=http://cdn1.example.com:25565,http://cdn2.example.com:8443
 
 ### 选择性同步 (`update-config.json`)
 
+将此文件放在挂载的服务端数据根目录；以上示例对应
+`/srv/mc-update/update-config.json`。
+
 ```json
 {
   "managed_paths": ["mods/", "config/", "resourcepacks/", "options.txt"],
@@ -177,33 +208,38 @@ server=http://cdn1.example.com:25565,http://cdn2.example.com:8443
 
 ## 项目结构
 
-```
-├── Dockerfile                    # 服务端镜像
-├── GUI_ADAPTER_API.md            # 自定义 GUI 指南（中文在 GUI_ADAPTER_API_CN.md）
+```text
+├── README.md / README_CN.md              # 运维与维护说明
+├── GUI_ADAPTER_API.md / GUI_ADAPTER_API_CN.md  # 对外 GUI 扩展契约
+├── LICENSE                               # MIT 许可证
+├── Dockerfile                            # 服务端镜像，从此根目录构建
 ├── server/
-│   ├── app.py                    # Flask API
-│   ├── entrypoint.sh             # 容器入口
-│   ├── generate_manifest.py      # 清单生成器
+│   ├── app.py                            # Flask API
+│   ├── entrypoint.sh                     # 容器入口
+│   ├── generate_manifest.py              # 清单生成器
 │   └── requirements.txt
 └── agent/
-    ├── META-INF/MANIFEST.MF
-    ├── build.sh / build.bat      # 构建两个 JAR
-    ├── setup-agent.sh / setup-agent.bat
+    ├── META-INF/MANIFEST.MF              # java-agent 启动器清单
+    ├── build.sh / build.bat              # 构建两个 JAR
+    ├── setup-agent.sh / setup-agent.bat  # 写入游戏目录配置
     └── src/
-        ├── Launcher.java         # 启动器（永不更新）
-        ├── UpdateAgent.java      # 兼容性 facade
+        ├── Launcher.java                 # 稳定启动器，不自更新
+        ├── UpdateAgent.java              # 兼容性 facade
         └── com/zack88604/autoupdater/
-            ├── bootstrap/        # AgentBootstrap 组合根
-            ├── config/           # AgentConfig
-            ├── application/      # Controller / Service / 事件 / 归约
-            ├── domain/           # Manifest / FileEntry / UpdateResult / AgentArtifact
-            ├── infrastructure/   # files / http / json
-            └── gui/              # api（契约）/ swing（默认）/ preset（外部预设）
+            ├── bootstrap/                # 组合根
+            ├── config/                   # 配置优先级
+            ├── application/              # 更新流程、取消、UI 状态泵
+            ├── domain/                   # 清单值对象
+            ├── infrastructure/           # 文件、HTTP、JSON
+            └── gui/
+                ├── api/                  # 对外 GUI 与 helper 契约
+                ├── swing/                # 内建回退 GUI
+                └── preset/               # V1/V2 外部预设运行时
 ```
 
 构建产物：
-- `UpdateAgent.jar` — 启动器 JAR（由 `-javaagent` 加载）
-- `UpdateAgent_core.jar` — 核心 Agent JAR（动态加载；可自更新）
+- `agent/UpdateAgent.jar` — 由 `-javaagent` 加载的启动器 JAR
+- `agent/UpdateAgent_core.jar` — 可自更新的核心 Agent JAR
 
 ## 许可证
 

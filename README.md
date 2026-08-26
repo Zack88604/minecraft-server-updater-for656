@@ -2,8 +2,16 @@
 
 > Keep Minecraft client resources in sync across machines — via a self-hosted HTTP API and a Java agent.
 
-- [中文文档](./README_CN.md)
-- [GUI Adapter API](./GUI_ADAPTER_API.md) — build your own GUI toolkit.
+- [中文说明](README_CN.md)
+- [GUI Adapter API](GUI_ADAPTER_API.md) — build a custom GUI preset.
+- [GUI Adapter API（中文）](GUI_ADAPTER_API_CN.md)
+
+## Documentation map
+
+| File | Audience | Purpose |
+|------|----------|---------|
+| `README.md` / `README_CN.md` | Operators and maintainers | Build, deploy, configure, and navigate the repository. |
+| `GUI_ADAPTER_API.md` / `GUI_ADAPTER_API_CN.md` | GUI developers | Public GUI contract, V1 presets, and V2 isolated Java-helper presets. |
 
 ## Overview
 
@@ -50,41 +58,61 @@ The core agent is composed of small layers (all under `com.zack88604.autoupdater
 
 | Package | Responsibility |
 |---------|----------------|
-| `application` | `UpdateController` (lifecycle), `UpdateService` (business flow), events & state reducer. |
+| `application` | `UpdateController` (lifecycle), `UpdateService` (business flow), events, state reduction, and rate-limited state rendering. |
 | `domain` | `Manifest`, `FileEntry`, `UpdateResult`, `AgentArtifact`. |
 | `infrastructure` | `FileManager`, `ServerClient`, JSON parsing. |
-| `gui.api` | Toolkit-neutral GUI contracts (what a custom GUI implements). |
-| `gui.swing` | Built-in Swing adapter. |
-| `gui.preset` | External GUI preset discovery & selection. |
-| `bootstrap` / `config` | Agent entry point composition & configuration. |
+| `gui.api` | Toolkit-neutral GUI contracts and Java-helper protocol APIs. |
+| `gui.swing` | Built-in Swing adapter and trusted preset chooser. |
+| `gui.preset` | V1 in-process and V2 isolated helper preset discovery, validation, and loading. |
+| `bootstrap` / `config` | Agent entry point composition and configuration resolution. |
 
 ## Quick Start
 
 ### Server
 
 ```bash
-# Build from the parent directory
-docker build -t mc-update-service -f Dockerfile .
+# From this repository root: build the agent first
+bash agent/build.sh
 
-# Run with file storage mounted
-docker run -d -p 25565:25565 -v /path/to/files:/data/files -v /path/to/agent:/data/agent --name mc-update mc-update-service
+# Create persistent server data and publish the current core JAR
+mkdir -p /srv/mc-update/files /srv/mc-update/agent
+cp agent/UpdateAgent_core.jar /srv/mc-update/agent/
 
-# Place UpdateAgent_core.jar in the agent directory
-cp UpdateAgent_core.jar /path/to/agent/
+# Build and run the server from this repository root
+docker build -t mc-update-service .
+docker run -d -p 25565:25565 \
+  -v /srv/mc-update:/data \
+  --name mc-update mc-update-service
 
-# Generate manifest after placing files under /data/files
-docker exec mc-update python3 /app/generate_manifest.py --dir /data/files --out /data --agent-jar /data/agent/UpdateAgent_core.jar
+# After changing files or update-config.json, regenerate the manifest
+docker exec mc-update python3 /app/generate_manifest.py \
+  --dir /data/files --out /data --agent-jar /data/agent/UpdateAgent_core.jar
 ```
 
 ### Agent
 
 ```bash
-cd agent
-./build.sh                              # or build.bat on Windows
-./setup-agent.sh ~/.minecraft/versions/1.20.1 http://your-server:25565
+# Linux/macOS (requires a JDK with javac)
+bash agent/build.sh
+bash agent/setup-agent.sh ~/.minecraft/versions/1.20.1 http://your-server:25565
+
+# Windows
+agent\build.bat
+agent\setup-agent.bat C:\path\to\instance http://your-server:25565
 ```
 
-The setup script writes server configuration to `mc-update.properties` in the game directory, and appends `-javaagent:<path>/UpdateAgent.jar` to the launcher's JVM arguments.
+The setup script writes server configuration to `mc-update.properties` in the game directory and appends `-javaagent:<path>/UpdateAgent.jar` to the launcher's JVM arguments.
+
+Runtime files owned by the updater:
+
+```text
+<game-dir>/
+├── mc-update.properties                 # persistent server/debug/adapter settings
+└── .mc-update/
+    ├── gui-selection.properties          # optional remembered GUI choice
+    ├── gui-presets/                      # external preset JARs
+    └── gui-runtimes/                     # verified V2 helper runtime extraction
+```
 
 ## API
 
@@ -106,7 +134,7 @@ logic or lifecycle control** in two ways:
 | Way | How | When to use |
 |-----|-----|-------------|
 | **Compile-in + property** | Compile your factory into the core JAR, set `mc-update.gui-adapter=<class>` | You own/rebuild the agent. |
-| **External preset** | Drop a JAR into `.mc-update/gui-presets/`, choose it on first launch | Distributing a GUI independently, no agent rebuild. |
+| **External preset** | Drop a V1 adapter JAR or V2 Java-helper JAR into `.mc-update/gui-presets/`, then choose it on first launch | Distributing a GUI independently, no agent rebuild. |
 
 See [GUI Adapter API](GUI_ADAPTER_API.md) for the full tutorial and API reference.
 
@@ -160,6 +188,9 @@ server=http://cdn1.example.com:25565,http://cdn2.example.com:8443
 
 ### Selective Sync (`update-config.json`)
 
+Place this file in the mounted server data root (for the example above,
+`/srv/mc-update/update-config.json`).
+
 ```json
 {
   "managed_paths": ["mods/", "config/", "resourcepacks/", "options.txt"],
@@ -178,33 +209,38 @@ cleaned up. Defaults: `managed_paths: ["*"]`, `excluded_paths: []`.
 
 ## Project Structure
 
-```
-├── Dockerfile                    # Server image
-├── GUI_ADAPTER_API.md            # Custom GUI guide (English / 中文)
+```text
+├── README.md / README_CN.md              # operator and maintainer guides
+├── GUI_ADAPTER_API.md / GUI_ADAPTER_API_CN.md  # public GUI extension contract
+├── LICENSE                               # MIT license
+├── Dockerfile                            # server image, built from this root
 ├── server/
-│   ├── app.py                    # Flask API
-│   ├── entrypoint.sh             # Container entrypoint
-│   ├── generate_manifest.py      # Manifest generator
+│   ├── app.py                            # Flask API
+│   ├── entrypoint.sh                     # container entrypoint
+│   ├── generate_manifest.py              # manifest generator
 │   └── requirements.txt
 └── agent/
-    ├── META-INF/MANIFEST.MF
-    ├── build.sh / build.bat      # Builds both JARs
-    ├── setup-agent.sh / setup-agent.bat
+    ├── META-INF/MANIFEST.MF              # java-agent launcher manifest
+    ├── build.sh / build.bat              # builds the two JARs
+    ├── setup-agent.sh / setup-agent.bat  # writes game-directory setup
     └── src/
-        ├── Launcher.java         # Launcher (never updated)
-        ├── UpdateAgent.java      # Compatibility facade
+        ├── Launcher.java                 # stable launcher, never self-updated
+        ├── UpdateAgent.java              # compatibility facade
         └── com/zack88604/autoupdater/
-            ├── bootstrap/        # AgentBootstrap composition root
-            ├── config/           # AgentConfig
-            ├── application/      # Controller / Service / events / reducer
-            ├── domain/           # Manifest / FileEntry / UpdateResult / AgentArtifact
-            ├── infrastructure/   # files / http / json
-            └── gui/              # api (contracts) / swing (default) / preset (external)
+            ├── bootstrap/                # composition root
+            ├── config/                   # configuration precedence
+            ├── application/              # update flow, cancellation, UI state pump
+            ├── domain/                   # manifest value objects
+            ├── infrastructure/           # files, HTTP, JSON
+            └── gui/
+                ├── api/                  # public GUI and helper contracts
+                ├── swing/                # built-in fallback GUI
+                └── preset/               # V1/V2 external preset runtime
 ```
 
 Build output:
-- `UpdateAgent.jar` — Launcher JAR (loaded by `-javaagent`)
-- `UpdateAgent_core.jar` — Core agent JAR (loaded dynamically; self-updatable)
+- `agent/UpdateAgent.jar` — launcher JAR loaded by `-javaagent`
+- `agent/UpdateAgent_core.jar` — self-updatable core JAR
 
 ## License
 

@@ -1,10 +1,10 @@
 # ── Minecraft Auto-Update Service Docker Image ────────────────────
 # Build (run from project root):
-#   docker build -t mc-update-service -f 656-auto-update/Dockerfile .
+#   docker build -t mc-update-service .
 # Run:
-#   docker run -d -p 25565:25565 -v /path/to/files:/data/files --name mc-update mc-update-service
+#   docker run -d -p 25565:25565 -v /path/to/data:/data --name mc-update mc-update-service
 # Generate manifest:
-#   docker exec mc-update python3 /app/generate_manifest.py "1.0" --dir /data/files --out /data
+#   docker exec mc-update python3 /app/generate_manifest.py --dir /data/files --out /data
 # ──────────────────────────────────────────────────────────────────
 
 FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/gcr.io/iguazio/alpine:3.20
@@ -13,7 +13,7 @@ FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/gcr.io/iguazio/alpine:3.20
 RUN apk add --no-cache python3 py3-flask
 
 # Copy server code
-COPY 656-auto-update/server/ /app/
+COPY server/ /app/
 
 # Create data directory structure
 RUN mkdir -p /data/files /data/agent

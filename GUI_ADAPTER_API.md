@@ -16,7 +16,13 @@ This guide has seven parts:
 7. [V2 Java helper presets](#7-v2-java-helper-presets)
 
 > A working reference implementation lives in `com.zack88604.autoupdater.gui.swing`
-> (the built-in Swing adapter). Mirror it for your own toolkit.
+> (the built-in Swing adapter). Mirror its lifecycle rules, not its Swing-specific code.
+
+Repository locations:
+
+- Public contracts: `agent/src/com/zack88604/autoupdater/gui/api/`
+- Built-in fallback: `agent/src/com/zack88604/autoupdater/gui/swing/`
+- Preset discovery and V2 helper runtime: `agent/src/com/zack88604/autoupdater/gui/preset/`
 
 ---
 
@@ -43,9 +49,12 @@ sequenceDiagram
     C->>S: run in worker thread
     loop every business event
         S-->>C: onUpdateEvent(event)
-        C->>C: reduce(event) → new UpdateUiState
-        C->>A: dispatcher.dispatch { render(state) }
-        A->>V: render(state)
+        C->>C: reduce(event) → newest UpdateUiState
+        C->>C: replace any pending render state
+    end
+    loop UI refresh (at most about 20 FPS)
+        C->>A: dispatcher.dispatch { render(latestState) }
+        A->>V: render(latestState)
     end
     S-->>C: Completed / Failed
     C->>V: render(final state)
@@ -58,12 +67,14 @@ sequenceDiagram
 | Thread | What runs there |
 |--------|-----------------|
 | **Update worker** | `UpdateService.run(...)` — HTTP, hashing, downloads, cleanup. Emits `UpdateEvent`s. |
-| **Controller** | Folds each event into an immutable `UpdateUiState`, then schedules one render. |
+| **Controller** | Folds events into immutable state, keeps only the newest pending snapshot, and rate-limits renders to about 20 FPS. |
 | **Your UI thread** | Everything `UpdateView` — reached through `GuiAdapter.dispatcher()`. |
 
 - The update core **never** imports `javax.swing`, `javafx`, or AWT.
 - Every `UpdateView` call (`open`, `render`, `close`) arrives on **your** UI thread
   through `UiDispatcher`.
+- A render is not guaranteed for every event. Treat each state as a complete replacement;
+  intermediate progress and log snapshots may be coalesced under load.
 - Your adapter only ever receives immutable display state and forwards close intent
   back — keep it away from network, file, or process work.
 
@@ -126,6 +137,7 @@ The adapter supplies the UI-thread bridge and creates your view.
 package com.example.updategui;
 
 import com.zack88604.autoupdater.gui.api.*;
+import javax.swing.SwingUtilities;
 
 public final class MyGuiAdapter implements GuiAdapter {
 
@@ -227,9 +239,11 @@ public final class MyGuiView implements UpdateView {
 
 Key points:
 
-- `render(state)` hands you the **entire** new state — don't infer business
-  conditions from previously rendered strings or keep mutable updater state in
-  the view.
+- `render(state)` hands you the **entire** newest state. Some intermediate states
+  can be skipped under load, so do not infer business conditions from a sequence of
+  rendered strings.
+- Keep only the latest immutable state needed for display or close-policy handling;
+  never mutate it or use the view as updater business state.
 - `open` / `render` / `close` all run on your UI thread as long as you return a
   working `UiDispatcher`.
 
@@ -412,7 +426,7 @@ Presentation settings only — no services, no mutable config, no process contro
 | `UpdatePhase` | `getPhase()` | Current stage (see 4.9). |
 | `String` | `getStatus()` | Headline text, e.g. "Downloading: mods/x.jar". |
 | `String` | `getDescription()` | Secondary text (may be empty). |
-| `List<String>` | `getLogLines()` | Chronological log snapshot. |
+| `List<String>` | `getLogLines()` | Chronological display-log tail. It is capped at 250 lines; a marker replaces omitted earlier entries. |
 | `List<String>` | `getServerUrls()` | Configured servers in priority order. |
 | `String` | `getCurrentServer()` | Active server (`null` before selection). |
 | `int` | `getOverallProgressPercent()` | Overall progress 0–100. |
@@ -423,8 +437,8 @@ Presentation settings only — no services, no mutable config, no process contro
 | `String` | `getErrorMessage()` | Display-safe failure text; `null` when none. |
 
 Build helpers: `UpdateUiState.initial()`, `UpdateUiState.builder()`. Render **the
-whole object** in `render(...)`; treat it as immutable, never retain it after the
-call returns.
+whole object** in `render(...)`; treat it as immutable. A view may keep the latest
+snapshot for display and close handling, but must not mutate it or reconstruct updater state.
 
 ### 4.9 `UpdatePhase` (enum)
 
@@ -470,6 +484,8 @@ DownloadProgress.active(String path, Kind kind, long downloadedBytes,
   `GuiAdapterContext` only for presentation settings.
 - **Do** make every `UpdateView` call run on the UI thread via your `UiDispatcher`.
 - **Do** treat `render(state)` input as a complete replacement snapshot.
+- **Do** make rendering inexpensive; the controller may skip intermediate states to
+  keep the UI responsive during large cleanups.
 - **Don't** infer business state from previously rendered strings.
 - **Don't** keep mutable updater state in the view.
 - **Don't** call `UpdateViewActions` for anything except close intent / native close.
@@ -481,9 +497,12 @@ DownloadProgress.active(String path, Kind kind, long downloadedBytes,
 1. Start a server and generate a manifest (see the README Quick Start).
 2. Point a game directory at it and select your adapter.
 3. Set `mc-update.debug=true` to keep the window open on success for inspection.
-4. Touch a managed file to exercise `DOWNLOADING`; remove a manifest entry to
-   exercise `CLEANING`; stop the server mid-flight to exercise failover and failure
-   paths (confirm `EXIT_FAILURE` exits the JVM on close).
+4. Touch a managed file to exercise `DOWNLOADING`; remove many manifest entries to
+   exercise `CLEANING`; while cleanup is busy, request close and verify that the
+   confirmation remains responsive. Confirming it must cancel at a safe checkpoint,
+   restore files changed by that update, launch Minecraft, and close the view.
+5. Stop the server mid-flight to exercise failover and failure paths (confirm
+   `EXIT_FAILURE` exits the JVM on close).
 
 ---
 
@@ -492,8 +511,8 @@ DownloadProgress.active(String path, Kind kind, long downloadedBytes,
 Use a V2 preset when the GUI needs a runtime that must not enter the Minecraft
 JVM, such as JavaFX or Compose Desktop. The updater verifies and extracts the
 runtime artifacts only after the user accepts the external-code warning, then
-starts a child Java process. The child receives complete `UpdateUiState`
-snapshots and can return only the standard close actions.
+starts a child Java process. The child receives complete, latest-state
+`UpdateUiState` snapshots and can return only the standard close actions.
 
 V1 presets remain unchanged: omit `preset-api` or set it to `1` and implement
 `GuiAdapterFactory` as described above.
