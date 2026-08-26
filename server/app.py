@@ -7,9 +7,13 @@ Provides manifest queries, file downloads, and more.
 import os
 import sys
 import json
+import hashlib
 import logging
 import mimetypes
+import re
 import subprocess
+
+from urllib.parse import quote
 
 from flask import Flask, jsonify, send_file, abort, request
 
@@ -20,6 +24,11 @@ LOGS_DIR = os.path.join(DATA_DIR, 'logs')
 AGENT_DIR = os.path.join(DATA_DIR, 'agent')
 MANIFEST_PATH = os.path.join(DATA_DIR, 'manifest.json')
 CONFIG_PATH = os.path.join(DATA_DIR, 'update-config.json')
+GUI_PRESETS_DIR = os.path.join(DATA_DIR, 'gui-presets')
+GUI_PRESET_CONFIG_PATH = os.path.join(DATA_DIR, 'gui-preset.json')
+
+_SAFE_GUI_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+_SAFE_GUI_ARCHIVE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.jar$')
 
 app = Flask(__name__)
 
@@ -90,6 +99,55 @@ def _load_manifest():
         return None
 
 
+def _sha256(filepath):
+    digest = hashlib.sha256()
+    with open(filepath, 'rb') as source:
+        for chunk in iter(lambda: source.read(8192), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_gui_preset_offer():
+    """Build a signed GUI-preset offer from the operator-managed descriptor."""
+    if not os.path.isfile(GUI_PRESET_CONFIG_PATH):
+        return None
+    try:
+        with open(GUI_PRESET_CONFIG_PATH, 'r', encoding='utf-8') as source:
+            config = json.load(source)
+        preset_id = config.get('id')
+        version = config.get('version')
+        filename = config.get('file')
+        key_id = config.get('key_id')
+        signature = config.get('signature')
+        if not all(isinstance(value, str) and value for value in
+                   (preset_id, version, filename, key_id, signature)):
+            raise ValueError('required fields are missing')
+        if (not _SAFE_GUI_ID.fullmatch(preset_id)
+                or not _SAFE_GUI_ID.fullmatch(key_id)
+                or not _SAFE_GUI_ARCHIVE.fullmatch(filename)
+                or len(version) > 128
+                or version != version.strip()
+                or any(ord(character) < 32 or ord(character) == 127
+                       for character in version)):
+            raise ValueError('descriptor contains an invalid id, version, or archive name')
+
+        archive = os.path.join(GUI_PRESETS_DIR, filename)
+        if not os.path.isfile(archive):
+            raise ValueError(f'preset archive is missing: {filename}')
+        return {
+            'id': preset_id,
+            'version': version,
+            'path': '/api/v2/gui-presets/' + quote(filename, safe=''),
+            'sha256': _sha256(archive),
+            'size': os.path.getsize(archive),
+            'key_id': key_id,
+            'signature': signature,
+        }
+    except (json.JSONDecodeError, OSError, ValueError) as error:
+        logger.error(f"Failed to load GUI preset offer: {error}")
+        return None
+
+
 @app.route('/api/manifest', methods=['GET'])
 def api_manifest_v1():
     """Deprecated v1 manifest endpoint — returns 410 Gone."""
@@ -111,6 +169,29 @@ def api_manifest():
     if manifest is None:
         return jsonify({'error': 'manifest not available'}), 503
     return jsonify(manifest)
+
+
+@app.route('/api/v2/gui-preset', methods=['GET'])
+def api_gui_preset():
+    """Return one optional signed GUI-preset descriptor."""
+    offer = _load_gui_preset_offer()
+    if offer is None:
+        abort(404)
+    response = jsonify(offer)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.route('/api/v2/gui-presets/<filename>', methods=['GET'])
+def api_gui_preset_download(filename):
+    """Download one direct-child GUI preset archive named by the signed offer."""
+    if not _SAFE_GUI_ARCHIVE.fullmatch(filename):
+        abort(404)
+    archive = os.path.join(GUI_PRESETS_DIR, filename)
+    if not os.path.isfile(archive):
+        abort(404)
+    logger.info(f"GUI preset download: {filename}")
+    return send_file(archive, mimetype='application/java-archive', as_attachment=False)
 
 
 @app.route('/api/files/<path:filepath>', methods=['GET'])

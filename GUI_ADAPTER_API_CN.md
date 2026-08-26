@@ -323,6 +323,17 @@ jar cf my-gui.jar -C classes . -C meta META-INF
 # 其中 meta/META-INF/mc-update-gui.properties 存放上面的元数据
 ```
 
+#### 服务端发布的预设
+
+服务端发布的预设使用与上文完全相同的 V1 或 V2 JAR 元数据。服务端只分发已签名
+描述和已校验的归档，不会获得额外的 GUI 控制 API。服务端预设策略与固定的
+Ed25519 公钥配置方式见 README。
+
+更新器会在 `.mc-update/gui-presets/` 中管理名为 `server-<id>.jar` 的归档；
+手动安装的预设不要使用该保留名称。用户只需对某个
+`id + key-id + 公钥指纹` 批准一次；同一身份签名的新版本可以直接加载。
+身份改变时会重新回到可信 Swing 确认对话框。
+
 #### 选择与回退行为
 
 1. **首次启动**（未保存选择）：由受信任的内建 Swing 对话框让用户选择外部预设或内建

@@ -44,6 +44,23 @@ public final class SwingGuiPresetChooser {
     }
 
 
+    /**
+     * Ask for explicit trust before a verified server-published preset runs.
+     * The result is persisted by the bootstrap for this exact preset identity.
+     */
+    public static boolean confirmServerPreset(final ServerGuiPresetOffer offer,
+                                              final String serverUrl) {
+        if (GraphicsEnvironment.isHeadless()) {
+            return false;
+        }
+        return onEventThread(new Callable<Boolean>() {
+            @Override
+            public Boolean call() {
+                return showServerRiskDialog(offer, serverUrl);
+            }
+        }, false);
+    }
+
     /** Tell the user that an approved external preset could not be loaded. */
     public static void showLoadFailure(final GuiPreset preset) {
         showMessage("Unable to load external GUI preset \"" + preset.getSelectionLabel()
@@ -89,6 +106,22 @@ public final class SwingGuiPresetChooser {
             return GuiPresetSelection.swing(false);
         }
         return GuiPresetSelection.preset(preset, remember.isSelected());
+    }
+
+    private static boolean showServerRiskDialog(ServerGuiPresetOffer offer,
+                                                 String serverUrl) {
+        String message = "The update server offers a signed external GUI preset:\\n\\n"
+                + offer.getId() + " (" + offer.getVersion() + ")\\n"
+                + "Server: " + serverUrl + "\\n\\n"
+                + "The archive hash and signature were verified against the public key "
+                + "configured on this client. Loading it still executes external Java code, "
+                + "which may read or modify files, access the network, or affect the game "
+                + "process. Only trust a server and publisher you recognize.\\n\\n"
+                + "Trust this preset identity and load it?";
+        Object[] options = {"Trust and load server GUI", "Use built-in Swing"};
+        return JOptionPane.showOptionDialog(null, message, "Server GUI security warning",
+                JOptionPane.DEFAULT_OPTION, JOptionPane.WARNING_MESSAGE, null, options,
+                options[1]) == 0;
     }
 
     private static boolean showRiskDialog(GuiPreset preset) {

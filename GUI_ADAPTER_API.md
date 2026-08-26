@@ -331,6 +331,19 @@ jar cf my-gui.jar -C classes . -C meta META-INF
 # where meta/META-INF/mc-update-gui.properties contains the metadata above
 ```
 
+#### Server-published presets
+
+A server-published preset uses exactly the same V1 or V2 JAR metadata described
+above. The server only distributes a signed descriptor and verified archive; it
+does not receive any additional GUI-control API. Configure the local
+server-preset policy and pinned Ed25519 public key as described in the README.
+
+The updater owns archives named `server-<id>.jar` inside
+`.mc-update/gui-presets/`. Do not use that reserved name for a manually
+installed preset. The user approves an `id + key-id + public-key fingerprint`
+once; a later version signed by that same identity can load directly. A changed
+identity returns to the trusted Swing approval dialog.
+
 #### Selection & fallback behavior
 
 1. **First launch** (no saved choice): a trusted built-in Swing dialog lets the user

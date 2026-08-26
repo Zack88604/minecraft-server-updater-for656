@@ -8,7 +8,7 @@ STARTUP_TS=$(date -u +'%Y%m%d_%H%M%S')
 export STARTUP_TS
 
 # Ensure log directory exists
-mkdir -p /data/logs
+mkdir -p /data/logs /data/gui-presets
 echo "[update-service] Log file: /data/logs/${STARTUP_TS}.log"
 
 # Auto-generate default manifest if missing

@@ -1,1 +1,2 @@
 flask>=3.0,<4.0
+cryptography>=42,<46

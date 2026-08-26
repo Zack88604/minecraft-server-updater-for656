@@ -10,13 +10,13 @@
 FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/gcr.io/iguazio/alpine:3.20
 
 # Install Python 3 and Flask (via apk to avoid PEP 668 restrictions)
-RUN apk add --no-cache python3 py3-flask
+RUN apk add --no-cache python3 py3-flask py3-cryptography
 
 # Copy server code
 COPY server/ /app/
 
 # Create data directory structure
-RUN mkdir -p /data/files /data/agent
+RUN mkdir -p /data/files /data/agent /data/gui-presets
 
 # Make entrypoint executable
 RUN chmod +x /app/entrypoint.sh

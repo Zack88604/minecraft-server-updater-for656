@@ -3,6 +3,7 @@ package com.zack88604.autoupdater.bootstrap;
 import com.zack88604.autoupdater.application.UpdateController;
 import com.zack88604.autoupdater.application.UpdateService;
 import com.zack88604.autoupdater.config.AgentConfig;
+import com.zack88604.autoupdater.config.ServerGuiMode;
 import com.zack88604.autoupdater.gui.api.GuiAdapter;
 import com.zack88604.autoupdater.gui.api.GuiAdapterContext;
 import com.zack88604.autoupdater.gui.api.GuiAdapterFactory;
@@ -13,6 +14,9 @@ import com.zack88604.autoupdater.gui.preset.GuiPreset;
 import com.zack88604.autoupdater.gui.preset.GuiPresetSelection;
 import com.zack88604.autoupdater.gui.preset.GuiPresetStore;
 import com.zack88604.autoupdater.gui.preset.JavaHelperGuiAdapter;
+import com.zack88604.autoupdater.gui.preset.ServerGuiPresetManager;
+import com.zack88604.autoupdater.gui.preset.ServerGuiPresetSignatureVerifier;
+import com.zack88604.autoupdater.gui.preset.ServerGuiPresetTrust;
 import com.zack88604.autoupdater.gui.swing.SwingGuiAdapterFactory;
 import com.zack88604.autoupdater.gui.swing.SwingGuiPresetChooser;
 
@@ -84,6 +88,7 @@ public final class AgentBootstrap {
         try {
             List<GuiPreset> presets = presetStore.findLoadablePresets();
             GuiPresetSelection selection = presetStore.readDefault(presets);
+            selection = resolveServerPresetSelection(config, presetStore, selection);
             if (selection == null) {
                 selection = SwingGuiPresetChooser.choose(presets);
             }
@@ -108,6 +113,65 @@ public final class AgentBootstrap {
             SwingGuiPresetChooser.showStorageFailure();
             return createBuiltInAdapter(context);
         }
+    }
+
+    /**
+     * Resolve an optional server preset before any external GUI classes load.
+     *
+     * <p>A remembered local Swing or local-preset selection wins in recommended
+     * mode. A remembered server preset is refreshed from its signed descriptor
+     * when available, and can continue from its verified local cache while the
+     * same configured signing key remains trusted.</p>
+     */
+    private static GuiPresetSelection resolveServerPresetSelection(AgentConfig config,
+                                                                    GuiPresetStore presetStore,
+                                                                    GuiPresetSelection selection)
+            throws IOException {
+        ServerGuiMode mode = config.getServerGuiMode();
+        if (mode == ServerGuiMode.DISABLED) {
+            return selection;
+        }
+
+        ServerGuiPresetTrust trust = presetStore.readServerTrust();
+        boolean selectedServerPreset = presetStore.isServerPresetSelection(selection, trust);
+        String configuredFingerprint = ServerGuiPresetSignatureVerifier.fingerprint(
+                config.getServerGuiPublicKey());
+
+        if (selectedServerPreset && (configuredFingerprint == null
+                || !configuredFingerprint.equals(trust.getKeyFingerprint()))) {
+            // Never continue to run a cached server archive after its pinned key changes.
+            return GuiPresetSelection.swing(false);
+        }
+        if (mode == ServerGuiMode.RECOMMENDED && selection != null
+                && !selectedServerPreset) {
+            return selection;
+        }
+
+        ServerGuiPresetManager.InstalledPreset installed = new ServerGuiPresetManager().install(
+                parseServerList(config.getServer()), config.getServerGuiKeyId(),
+                config.getServerGuiPublicKey(), presetStore);
+        if (installed == null) {
+            return mode == ServerGuiMode.REQUIRED
+                    ? GuiPresetSelection.swing(false) : selection;
+        }
+
+        boolean trusted = trust != null
+                && trust.matches(installed.getOffer(), installed.getKeyFingerprint());
+        if (!trusted) {
+            if (!SwingGuiPresetChooser.confirmServerPreset(installed.getOffer(),
+                    installed.getServerUrl())) {
+                return mode == ServerGuiMode.REQUIRED || selection == null
+                        ? GuiPresetSelection.swing(false) : selection;
+            }
+            try {
+                presetStore.saveServerTrust(installed.toTrustRecord());
+            } catch (IOException error) {
+                // The approved JAR may run once, but approval is not retained.
+                System.err.println("Unable to save server GUI trust: " + error.getMessage());
+                return GuiPresetSelection.preset(installed.getPreset(), false);
+            }
+        }
+        return GuiPresetSelection.preset(installed.getPreset(), true);
     }
 
     private static GuiAdapter createPresetAdapter(GuiPreset preset, GuiAdapterContext context)

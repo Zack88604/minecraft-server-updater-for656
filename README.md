@@ -75,7 +75,7 @@ The core agent is composed of small layers (all under `com.zack88604.autoupdater
 bash agent/build.sh
 
 # Create persistent server data and publish the current core JAR
-mkdir -p /srv/mc-update/files /srv/mc-update/agent
+mkdir -p /srv/mc-update/files /srv/mc-update/agent /srv/mc-update/gui-presets
 cp agent/UpdateAgent_core.jar /srv/mc-update/agent/
 
 # Build and run the server from this repository root
@@ -110,7 +110,8 @@ Runtime files owned by the updater:
 ├── mc-update.properties                 # persistent server/debug/adapter settings
 └── .mc-update/
     ├── gui-selection.properties          # optional remembered GUI choice
-    ├── gui-presets/                      # external preset JARs
+    ├── gui-server-trust.properties       # approved signed server preset identity
+    ├── gui-presets/                      # local and server-downloaded preset JARs
     └── gui-runtimes/                     # verified V2 helper runtime extraction
 ```
 
@@ -121,6 +122,8 @@ Runtime files owned by the updater:
 | `/api/v2/manifest` | GET | Full file manifest (paths, SHA-256, sizes) |
 | `/api/files/<path>` | GET | Download a resource file |
 | `/api/agent` | GET | Download the latest `UpdateAgent_core.jar` |
+| `/api/v2/gui-preset` | GET | Optional signed server GUI-preset descriptor |
+| `/api/v2/gui-presets/<archive>.jar` | GET | Archive named by a signed GUI-preset descriptor |
 | `/api/config` | GET | Managed paths & excluded paths configuration |
 | `/api/generate` | POST | Regenerate manifest (token-protected) |
 | `/api/health` | GET | Health check |
@@ -165,6 +168,9 @@ Configuration is resolved in this order (normal mode):
 | `mc-update.game-dir` | `.` | Minecraft directory |
 | `mc-update.debug` | `false` | Keep GUI open after sync |
 | `mc-update.gui-adapter` | *(built-in Swing)* | Fully qualified `GuiAdapterFactory` class |
+| `mc-update.server-gui` | `disabled` | `disabled`, `recommended`, or `required` server-preset policy |
+| `mc-update.server-gui-key-id` | *(empty)* | Required signing key id for a server GUI preset |
+| `mc-update.server-gui-public-key` | *(empty)* | Base64 X.509 Ed25519 public key pinned by this client |
 
 **Recommended: `mc-update.properties`** (written by setup script):
 ```properties
@@ -185,6 +191,43 @@ server=http://cdn1.example.com:25565,http://cdn2.example.com:8443
 ```
 -javaagent:UpdateAgent.jar=admin=true,server=http://override:25565
 ```
+
+### Server-published GUI presets
+
+A server can publish one signed GUI preset outside the normal game-file manifest.
+The client verifies the descriptor signature and JAR SHA-256 before it can
+consider the archive. Remote GUI loading is disabled by default.
+
+Place the JAR in /srv/mc-update/gui-presets/. Generate an Ed25519 key once,
+keep its private half outside the server container, and create
+/srv/mc-update/gui-preset.json after every JAR, version, file-name, or key-id
+change:
+
+    openssl genpkey -algorithm Ed25519 -out /secure/gui-preset-key.pem
+    python3 -m pip install -r server/requirements.txt
+    python3 server/sign_gui_preset.py \
+      --preset /srv/mc-update/gui-presets/example-javafx.jar \
+      --id example-javafx --version 1.0.0 --key-id official-2026 \
+      --private-key /secure/gui-preset-key.pem \
+      --out /srv/mc-update/gui-preset.json \
+      --public-key-out /secure/gui-preset-public-key.b64
+
+Copy the resulting Base64 public key into each client configuration:
+
+    server-gui=recommended
+    server-gui-key-id=official-2026
+    server-gui-public-key=<Base64 X.509 Ed25519 public key>
+
+recommended uses the verified server preset only when no remembered local choice
+wins, while refreshing a selected server preset. required overrides a remembered
+local choice only after the same preset identity has been approved. disabled is
+the default. An explicit gui-adapter class always takes precedence.
+
+On first use of an id + key-id + public-key fingerprint, the built-in Swing
+dialog explains the external-code risk and asks for approval. Later signed
+versions of that same identity load without another prompt. A changed signing
+key or id requires a new approval. Java 15 or newer is required for Ed25519
+verification; older JVMs fall back to Swing. Use HTTPS in production.
 
 ### Selective Sync (`update-config.json`)
 
@@ -218,6 +261,7 @@ cleaned up. Defaults: `managed_paths: ["*"]`, `excluded_paths: []`.
 │   ├── app.py                            # Flask API
 │   ├── entrypoint.sh                     # container entrypoint
 │   ├── generate_manifest.py              # manifest generator
+│   ├── sign_gui_preset.py                 # signs a server GUI-preset descriptor
 │   └── requirements.txt
 └── agent/
     ├── META-INF/MANIFEST.MF              # java-agent launcher manifest

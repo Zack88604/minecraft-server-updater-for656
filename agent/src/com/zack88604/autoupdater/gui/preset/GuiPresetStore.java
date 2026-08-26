@@ -34,17 +34,23 @@ public final class GuiPresetStore {
     public static final String PRESET_METADATA_PATH = "META-INF/mc-update-gui.properties";
 
     private static final String SELECTION_FILE_NAME = "gui-selection.properties";
+    private static final String SERVER_TRUST_FILE_NAME = "gui-server-trust.properties";
     private static final String KEY_REMEMBER = "remember";
     private static final String KEY_MODE = "mode";
     private static final String KEY_ARCHIVE = "preset-file";
     private static final String KEY_FACTORY = "factory-class";
     private static final String MODE_SWING = "swing";
     private static final String MODE_PRESET = "preset";
+    private static final String KEY_SERVER_PRESET_ID = "preset-id";
+    private static final String KEY_SERVER_KEY_ID = "key-id";
+    private static final String KEY_SERVER_KEY_FINGERPRINT = "key-fingerprint";
+    private static final String KEY_SERVER_ARCHIVE = "archive-name";
     private static final long MAX_METADATA_SIZE = 16 * 1024;
 
     private final File configurationDirectory;
     private final File presetDirectory;
     private final File selectionFile;
+    private final File serverTrustFile;
 
     /** Bind the store to one configured Minecraft game directory. */
     public GuiPresetStore(String gameDirectory) {
@@ -52,6 +58,7 @@ public final class GuiPresetStore {
         this.configurationDirectory = new File(root, CONFIG_DIRECTORY_NAME);
         this.presetDirectory = new File(configurationDirectory, PRESET_DIRECTORY_NAME);
         this.selectionFile = new File(configurationDirectory, SELECTION_FILE_NAME);
+        this.serverTrustFile = new File(configurationDirectory, SERVER_TRUST_FILE_NAME);
     }
 
     /** Return the updater-owned configuration directory. */
@@ -175,6 +182,61 @@ public final class GuiPresetStore {
         Files.deleteIfExists(selectionFile.toPath());
     }
 
+    /** Read the local approval record for a signed server preset, if any. */
+    public ServerGuiPresetTrust readServerTrust() throws IOException {
+        if (!serverTrustFile.isFile()) {
+            return null;
+        }
+        Properties values = new Properties();
+        try (InputStream input = new FileInputStream(serverTrustFile)) {
+            values.load(input);
+        }
+        String presetId = trim(values.getProperty(KEY_SERVER_PRESET_ID));
+        String keyId = trim(values.getProperty(KEY_SERVER_KEY_ID));
+        String fingerprint = trim(values.getProperty(KEY_SERVER_KEY_FINGERPRINT));
+        String archiveName = trim(values.getProperty(KEY_SERVER_ARCHIVE));
+        if (presetId == null || keyId == null || fingerprint == null
+                || archiveName == null || archiveName.indexOf('/') >= 0
+                || archiveName.indexOf('\\') >= 0 || !archiveName.endsWith(".jar")) {
+            return null;
+        }
+        return new ServerGuiPresetTrust(presetId, keyId, fingerprint, archiveName);
+    }
+
+    /** Persist one explicit user approval for a signed server preset identity. */
+    public void saveServerTrust(ServerGuiPresetTrust trust) throws IOException {
+        ensureDirectories();
+        Properties values = new Properties();
+        values.setProperty(KEY_SERVER_PRESET_ID, trust.getPresetId());
+        values.setProperty(KEY_SERVER_KEY_ID, trust.getKeyId());
+        values.setProperty(KEY_SERVER_KEY_FINGERPRINT, trust.getKeyFingerprint());
+        values.setProperty(KEY_SERVER_ARCHIVE, trust.getArchiveName());
+        writeProperties(serverTrustFile, values, "Minecraft updater server GUI trust");
+    }
+
+    /** Return whether a remembered selection is the locally trusted server archive. */
+    public boolean isServerPresetSelection(GuiPresetSelection selection,
+                                           ServerGuiPresetTrust trust) {
+        return selection != null && !selection.isSwing() && trust != null
+                && trust.getArchiveName().equals(selection.getPreset().getArchiveName());
+    }
+
+    /** Return the reserved direct-child archive location for a validated server preset id. */
+    File getServerPresetArchive(String presetId) throws IOException {
+        ensureDirectories();
+        return new File(presetDirectory, "server-" + presetId + ".jar");
+    }
+
+    /** Atomically replace one server-managed archive after hash verification. */
+    void replaceServerPresetArchive(File temporary, File destination) throws IOException {
+        File root = presetDirectory.getCanonicalFile();
+        File parent = destination.getCanonicalFile().getParentFile();
+        if (!root.equals(parent)) {
+            throw new IOException("Invalid server GUI preset destination");
+        }
+        moveReplacing(temporary, destination);
+    }
+
     private void ensureDirectories() throws IOException {
         createDirectory(configurationDirectory);
         createDirectory(presetDirectory);
@@ -238,6 +300,22 @@ public final class GuiPresetStore {
                     runtimeKind, runtimeManifestPath);
         } catch (IOException ignored) {
             return null;
+        }
+    }
+
+    private static void writeProperties(File target, Properties values, String comment)
+            throws IOException {
+        File directory = target.getParentFile();
+        File temporary = File.createTempFile("gui-settings-", ".tmp", directory);
+        try {
+            try (FileOutputStream output = new FileOutputStream(temporary)) {
+                values.store(output, comment);
+            }
+            moveReplacing(temporary, target);
+        } finally {
+            if (temporary.exists()) {
+                Files.deleteIfExists(temporary.toPath());
+            }
         }
     }
 
