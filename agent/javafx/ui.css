@@ -15,7 +15,7 @@
  *     --color-text-muted      #6B7681   pct, speed, details label
  *     --color-accent          #5DD35D   focus, progress fill, primary action
  *     --color-success         #3FAE57   SUCCESS state title
- *     --color-error           #E05252   ERROR state title, danger-button
+ *     --color-error           #E05252   ERROR state title (no red primary buttons)
  *     --color-error-soft      #C56F6F   ERROR state description (round-2)
  *     --color-border          #2A3238   borders
  *     --color-border-strong   #3A454D   hover / focus borders
@@ -40,7 +40,6 @@
  * ===================================================================== */
 
 .root {
-    -fx-background-color: #0F1417;
     -fx-font-family: "System";
     -fx-font-size: 13px;
     -fx-text-fill: #E6E8EB;
@@ -48,6 +47,31 @@
        control (buttons, text area, details) stays flat. */
     -fx-focus-color: #5DD35D;
     -fx-faint-focus-color: #5DD35D33;
+    /* No -fx-background-color here: the rounded window's dark background is
+       painted by .window-root (the BorderPane), while the scene root (.frame)
+       stays transparent so the desktop shows through the corners. */
+}
+
+/* ── Rounded frameless window (第二轮 ui美化.md 一) ────────────────
+   The scene root is a transparent StackPane (.window-frame) that reserves a
+   shadow margin around the rounded client area. The BorderPane (.window-root)
+   paints the dark background with WINDOW_RADIUS rounded corners and carries
+   the drop shadow, which composites over the desktop through the transparent
+   scene — no black right-angle base. The radius matches the quit dialog so the
+   two windows form one design language. */
+.window-frame {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-padding: 12 18 24 18;
+}
+.window-root {
+    -fx-background-color: #0F1417;
+    -fx-background-insets: 0;
+    -fx-background-radius: 12px;
+    -fx-border-color: rgba(255, 255, 255, 0.05);
+    -fx-border-width: 1px;
+    -fx-border-radius: 12px;
+    -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.40), 14, 0.0, 0, 6);
 }
 
 /* ── Status ─────────────────────────────────────────────────────── */
@@ -73,6 +97,65 @@
    is fitted to 64x64 in JavaFxUpdateView and hidden (managed=false) while no
    art is shown, so an empty slot contributes no height and never breaks the
    layout. Phase switches cross-fade between the two stacked ImageViews. */
+
+/* ── Custom title bar (frameless window) ────────────────────────── */
+
+/* Top row of the frameless window: the title label (which is also the drag
+   region) on the left, the × button on the right. A hairline below separates
+   the bar from the content, like a real title bar. */
+.title-bar {
+    -fx-background-color: #0F1417;
+    -fx-background-insets: 0;
+    -fx-border-color: transparent transparent #2A3238 transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-alignment: center-left;
+    -fx-padding: 0 6 0 14;
+}
+
+.title-bar-title {
+    -fx-font-size: 12px;
+    -fx-font-weight: 600;
+    -fx-text-fill: #A8B0BA;
+}
+
+/* Frameless-window close button (also reused by "Skip update" in the quit
+   dialog, 第二轮 ui美化.md 三): a quiet, borderless window-control button.
+   Default is transparent with a low-weight ×; hover shows a faint neutral
+   tint, press deepens it. No green outline — it is a control, not a primary
+   action.
+
+   The selectors are prefixed with .button so this block beats the generic
+   .button / .button:focused rules later in the file (same specificity, later
+   rule would otherwise win and draw the default green focus border + dark
+   fill on the ×). */
+.button.window-close-button {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-background-radius: 6px;
+    -fx-border-color: transparent;
+    -fx-border-width: 1px;
+    -fx-border-radius: 6px;
+    -fx-padding: 4px 10px 4px 10px;
+    -fx-min-width: 32px;
+    -fx-min-height: 26px;
+    -fx-text-fill: #6B7681;
+    -fx-font-size: 14px;
+    -fx-focus-color: transparent;
+    -fx-faint-focus-color: transparent;
+}
+.button.window-close-button:hover {
+    -fx-background-color: rgba(255, 255, 255, 0.07);
+    -fx-border-color: transparent;
+    -fx-text-fill: #E6E8EB;
+}
+.button.window-close-button:pressed {
+    -fx-background-color: rgba(255, 255, 255, 0.13);
+    -fx-border-color: transparent;
+    -fx-text-fill: #FFFFFF;
+}
+.button.window-close-button:focused {
+    -fx-border-color: transparent;
+}
 
 /* ── Overall progress area ──────────────────────────────────────── */
 
@@ -328,22 +411,36 @@
     -fx-text-fill: #6B7681;
 }
 
-/* Destructive action inside the Quit-update Alert. */
-.danger-button {
-    -fx-background-color: #E05252;
-    -fx-border-color: #E05252;
-    -fx-text-fill: #FFFFFF;
+/* Primary action inside the Quit-update Alert: "Keep updating" is the
+   recommended default (第二轮 ui美化.md 三) — solid accent green with
+   high-contrast dark text. The :default state is spelled out so the native
+   default-button gradient never replaces the green fill. */
+.primary-button,
+.primary-button:default,
+.primary-button:focused,
+.primary-button:default:focused {
+    -fx-background-color: #5DD35D;
+    -fx-background-insets: 0;
+    -fx-background-radius: 6px;
+    -fx-border-color: #5DD35D;
+    -fx-border-width: 1px;
+    -fx-border-radius: 6px;
+    -fx-text-fill: #0A0F0B;
+    -fx-font-weight: 600;
+    -fx-font-size: 13px;
+    -fx-padding: 6px 16px 6px 16px;
+    -fx-focus-color: transparent;
+    -fx-faint-focus-color: transparent;
 }
-.danger-button:hover {
-    -fx-background-color: #C84A4A;
-    -fx-border-color: #C84A4A;
+.primary-button:hover,
+.primary-button:default:hover {
+    -fx-background-color: #6BDC6B;
+    -fx-border-color: #6BDC6B;
 }
-.danger-button:pressed {
-    -fx-background-color: #B04343;
-    -fx-border-color: #B04343;
-}
-.danger-button:focused {
-    -fx-border-color: #FFFFFF;
+.primary-button:pressed,
+.primary-button:default:pressed {
+    -fx-background-color: #4AC659;
+    -fx-border-color: #4AC659;
 }
 
 /* ── Terminal state classes (maintained on .root by setPhase) ─────── */
@@ -367,8 +464,27 @@
 .dialog-pane {
     -fx-background-color: #0F1417;
     -fx-background-insets: 0;
-    -fx-background-radius: 10px;
+    -fx-background-radius: 12px;
     -fx-padding: 16px;
+    /* The dialog is TRANSPARENT (frameless), so the rounded corners really are
+       rounded and this shadow floats over the desktop — the decorated window's
+       native shadow is gone. Radius 12 matches the main window (第二轮
+       ui美化.md 五). */
+    -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.35), 24, 0.0, 0, 6);
+}
+
+/* Frameless dialog: the "Quit update?" title moved into the header panel
+   (styled as .dialog-header) since there is no system title bar. */
+.dialog-pane > .header-panel {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-padding: 0 0 10 0;
+}
+
+.dialog-pane .dialog-header {
+    -fx-font-size: 16px;
+    -fx-font-weight: 600;
+    -fx-text-fill: #E6E8EB;
 }
 
 .dialog-pane .label {

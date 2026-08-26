@@ -25,12 +25,16 @@ import javafx.scene.control.TextArea;
 import javafx.scene.control.TitledPane;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
+import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
+import javafx.scene.paint.Color;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
+import javafx.stage.StageStyle;
+import javafx.stage.WindowEvent;
 import javafx.util.Duration;
 
 import java.util.ArrayList;
@@ -59,6 +63,14 @@ import java.util.regex.Pattern;
  * Quit-update dialog is open (begin/cancel close confirmation) and in the
  * terminal SUCCESS/ERROR phases the close request is honoured directly.</p>
  *
+ * <p>The window is frameless ({@link StageStyle#TRANSPARENT}): the custom title
+ * bar carries a × button that fires the same {@code WINDOW_CLOSE_REQUEST} the
+ * system title bar used to, so every close decision flows through the identical
+ * {@code onCloseRequest} path (confirm / terminal close / UpdateViewActions
+ * lifecycle). The title bar is also the drag region. The Quit-update dialog is
+ * frameless too and shows its title as an internal header instead of a system
+ * title bar.</p>
+ *
  * <p><b>第一阶段 §强制约束 1</b>: the log tail is display-only. This view does not
  * derive {@code cleanScanned}/{@code cleanRemoved} counts from the (possibly
  * truncated) log — the CLEANING phase shows a degraded descriptive subtitle and
@@ -77,6 +89,8 @@ final class JavaFxUpdateView implements UpdateView {
     // Expanding Details (debug mode or error state) grows the window to its
     // content's preferred height — never a fixed expanded height, so Error /
     // Debug states don't leave dead space at the bottom (see applyWindowHeight).
+    // The window is frameless (WINDOW_STYLE), so the custom title bar lives
+    // inside the scene; the collapsed floor therefore includes TITLE_BAR_HEIGHT.
     private static final double WINDOW_WIDTH = 520;
     private static final double WINDOW_HEIGHT_COLLAPSED = 300;
 
@@ -94,6 +108,40 @@ final class JavaFxUpdateView implements UpdateView {
 
     private static final String FOOTER_COPYRIGHT =
             "Developed by Zack88604 · MIT License · UI redesign by Eternity_Riguru";
+
+    // Frameless-window decoration. TRANSPARENT is preferred over UNDECORATED
+    // (UI美化.md / 第二轮 ui美化.md): the scene is transparent and the window
+    // root paints the dark background with WINDOW_RADIUS rounded corners, so
+    // the desktop shows through the four corners and the drop shadow
+    // composites cleanly over the desktop — no black right-angle base. The
+    // main window and the "Quit update?" dialog share the same radius. No
+    // business behaviour depends on the window chrome; the close path, helper
+    // lifecycle, terminal state, preflight and preset handling all run through
+    // the exact same code as a decorated window.
+    private static final StageStyle WINDOW_STYLE = StageStyle.TRANSPARENT;
+    /** Height of the custom title bar (drag region + window close button). */
+    private static final double TITLE_BAR_HEIGHT = 34;
+
+    // Rounded frameless window (第二轮 ui美化.md 一). The main window shares the
+    // dialog's corner radius so the two form one design language. The scene is
+    // transparent and the window root paints the dark background with these
+    // rounded corners, so the desktop shows through the four corners — no black
+    // right-angle base.
+    private static final double WINDOW_RADIUS = 12;
+
+    // Shadow margin reserved INSIDE the transparent scene, around the rounded
+    // client area, so the drop shadow composites over the desktop instead of
+    // being clipped at the scene edge. Larger on the bottom because the shadow
+    // is offset downward.
+    private static final double SHADOW_TOP = 12;
+    private static final double SHADOW_SIDE = 18;
+    private static final double SHADOW_BOTTOM = 24;
+
+    /** Scene height of the collapsed window, including the title bar and the
+     *  shadow margin. The content floor stays WINDOW_HEIGHT_COLLAPSED. */
+    private static double collapsedSceneHeight() {
+        return WINDOW_HEIGHT_COLLAPSED + TITLE_BAR_HEIGHT + SHADOW_TOP + SHADOW_BOTTOM;
+    }
 
     // Status-illustration resources (JAR-relative), bundled into the core JAR
     // from agent/images/ and preloaded into the statusImages cache at startup.
@@ -153,16 +201,30 @@ final class JavaFxUpdateView implements UpdateView {
     private Animation headerFade;
 
     // Root layout — carries the .success-state / .error-state state classes.
-    private final VBox root = new VBox(8);
+    // A BorderPane so the custom title bar (drag region + ×) spans the full
+    // window width above the padded content column (frameless window).
+    private final BorderPane root = new BorderPane();
+
+    // Transparent scene root that holds `root` and reserves the shadow margin
+    // around it (rounded frameless window). The scene fill is TRANSPARENT, so
+    // the desktop shows through the corners; `root` paints the rounded dark
+    // background + drop shadow.
+    private final StackPane frame = new StackPane();
+
+    // Custom title bar (frameless window): the title label doubles as the drag
+    // region; the × button reuses the normal close-request path.
+    private final HBox titleBar = new HBox();
+    private final Label lblWindowTitle = new Label("Minecraft Update Check");
+    private final Button btnWindowClose = new Button("✕");
+    // Drag offsets captured on mouse press, applied on mouse drag.
+    private double dragX;
+    private double dragY;
 
     /** External form of /ui.css, or null if the stylesheet is missing. */
     private final String stylesheet;
 
     /** The scene backing the window; resized when Details expands/collapses. */
     private Scene scene;
-
-    /** Vertical window chrome (title bar + borders), measured once. */
-    private double chrome;
 
     /** The destructive "Skip update" action, created per Quit-alert instance. */
     private ButtonType quitSkipType;
@@ -769,13 +831,56 @@ final class JavaFxUpdateView implements UpdateView {
     }
 
     /**
+     * The custom title-bar × button. It must behave exactly like clicking the
+     * old system title-bar close, so it fires the same
+     * {@link WindowEvent#WINDOW_CLOSE_REQUEST} the OS would and lets the normal
+     * {@code onCloseRequest} path run unchanged: in-progress phases open the
+     * Quit-update confirmation (begin/cancel/confirm close confirmation +
+     * UpdateViewActions lifecycle), terminal phases report {@code windowClosed}
+     * straight to the agent. It never calls {@code stage.close()} directly.
+     * When the handler did not consume the request (terminal phase), the
+     * platform would have hidden the window after delivering the close request —
+     * emulate that here so the visible behaviour matches the decorated window;
+     * the agent independently replies to {@code windowClosed} with close/exit.
+     */
+    private void requestCloseFromTitleBar() {
+        WindowEvent closeRequest = new WindowEvent(stage, WindowEvent.WINDOW_CLOSE_REQUEST);
+        stage.fireEvent(closeRequest);
+        if (!closeRequest.isConsumed()) {
+            stage.close();
+        }
+    }
+
+    /**
+     * Make a region drag the whole window: record where in the window the mouse
+     * was pressed, then move the stage so the cursor stays at the same spot.
+     * Only the title bar carries this handler, so the rest of the UI is not
+     * draggable. Pressing the × button never starts a drag (Button consumes its
+     * own presses, and a bubbled press whose target is the button is skipped).
+     */
+    private void installWindowDrag(javafx.scene.Node dragRegion) {
+        dragRegion.setOnMousePressed(e -> {
+            if (e.getTarget() instanceof Button) {
+                return;   // let the × button handle its own press
+            }
+            dragX = e.getScreenX() - stage.getX();
+            dragY = e.getScreenY() - stage.getY();
+        });
+        dragRegion.setOnMouseDragged(e -> {
+            stage.setX(e.getScreenX() - dragX);
+            stage.setY(e.getScreenY() - dragY);
+        });
+    }
+
+    /**
      * Ask whether to abandon the running update. The update is paused at its next
      * safe checkpoint while the dialog is open ({@code beginCloseConfirmation}),
      * so it cannot race ahead of the user's decision. Only an explicit
      * "Skip update" invokes the close flow; "Keep updating" or dismissing the
      * dialog resumes the update ({@code cancelCloseConfirmation}). The dialog
-     * shares the main window's stylesheet, and the skip button gets the
-     * {@code danger-button} class so it renders as the destructive action.
+     * shares the main window's stylesheet; Keep updating renders as the primary
+     * green action and Skip update as a quiet, borderless secondary
+     * (第二轮 ui美化.md 三) — neither is a red primary button.
      */
     private void confirmQuit() {
         listener.beginCloseConfirmation();
@@ -794,11 +899,37 @@ final class JavaFxUpdateView implements UpdateView {
      * Build the "Quit update?" confirmation. Exposed as a factory (rather than
      * constructed inline) so the screenshot harness can render it. Uses
      * {@link Alert.AlertType#NONE} so no default Question icon appears.
+     *
+     * <p>The dialog is frameless like the main window (no system title bar) and
+     * deliberately carries no extra × — it can only be ended by the existing
+     * "Keep updating" / "Skip update" buttons (begin/cancel close confirmation
+     * and the final close decision stay untouched). With the title bar gone, the
+     * "Quit update?" title is shown as a styled header inside the dialog instead.</p>
      */
     Alert createQuitAlert() {
         Alert alert = new Alert(Alert.AlertType.NONE);
         alert.setTitle("Quit update?");
+        // Frameless dialog: same TRANSPARENT stage style as the main window.
+        alert.initStyle(WINDOW_STYLE);
+        // A TRANSPARENT stage only makes the window compositor transparent — the
+        // Alert still builds its own scene with the default WHITE fill, and that
+        // white shows through the rounded corners of .dialog-pane (the corners
+        // are transparent). The main window solves this with an explicit
+        // scene.setFill(TRANSPARENT); do the same here as soon as the dialog's
+        // scene exists (i.e. before the first paint), so the desktop shows
+        // through the corners instead of a white square.
+        if (alert.getDialogPane().getScene() != null) {
+            alert.getDialogPane().getScene().setFill(Color.TRANSPARENT);
+        }
+        alert.getDialogPane().sceneProperty().addListener((obs, oldScene, newScene) -> {
+            if (newScene != null) {
+                newScene.setFill(Color.TRANSPARENT);
+            }
+        });
         alert.setHeaderText(null);
+        Label header = new Label("Quit update?");
+        header.getStyleClass().add("dialog-header");
+        alert.getDialogPane().setHeader(header);
         alert.setContentText("The update is still in progress. Skipping it may leave Minecraft out of date.");
         ButtonType stay = new ButtonType("Keep updating", ButtonBar.ButtonData.OK_DONE);
         quitSkipType = new ButtonType("Skip update", ButtonBar.ButtonData.OTHER);
@@ -808,9 +939,13 @@ final class JavaFxUpdateView implements UpdateView {
             alert.getDialogPane().getStylesheets().add(stylesheet);
         }
         alert.getDialogPane().getStyleClass().add("root");
-        Button skipButton = (Button) alert.getDialogPane().lookupButton(quitSkipType);
-        skipButton.getStyleClass().add("danger-button");
+        // Button hierarchy (第二轮 ui美化.md 三): Keep updating is the primary
+        // (green solid, default) action; Skip update is a quiet, borderless
+        // secondary control styled like the window × — never a red primary.
+        ((Button) alert.getDialogPane().lookupButton(stay)).getStyleClass().add("primary-button");
         ((Button) alert.getDialogPane().lookupButton(stay)).setDefaultButton(true);
+        Button skipButton = (Button) alert.getDialogPane().lookupButton(quitSkipType);
+        skipButton.getStyleClass().add("window-close-button");
         return alert;
     }
 
@@ -818,11 +953,35 @@ final class JavaFxUpdateView implements UpdateView {
 
     private void initUI(String gameDir) {
         stage.setTitle("Minecraft Update Check");
+        // Frameless window: no system title bar. The window keeps the title for
+        // the taskbar / accessibility, but the visible chrome is the custom
+        // title bar below. TRANSPARENT (not UNDECORATED) so the rounded dialog
+        // and its shadow composite cleanly over the desktop.
+        stage.initStyle(WINDOW_STYLE);
         // Forward the user closing the window to the flow controller, gated by
-        // the in-progress confirmation.
+        // the in-progress confirmation. This is the SAME handler the custom ×
+        // button drives (requestCloseFromTitleBar) — the close path is
+        // byte-for-byte identical to clicking the old system title-bar close.
         stage.setOnCloseRequest(e -> onCloseRequestedByUser(e));
 
         root.getStyleClass().add("root");
+        root.getStyleClass().add("window-root");
+
+        // Custom title bar — the top row of the frameless window. The title
+        // label fills the bar and is the drag region; the × button reuses the
+        // normal close-request path (never stage.close() directly).
+        lblWindowTitle.getStyleClass().add("title-bar-title");
+        lblWindowTitle.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(lblWindowTitle, Priority.ALWAYS);
+        btnWindowClose.getStyleClass().add("window-close-button");
+        btnWindowClose.setOnAction(e -> requestCloseFromTitleBar());
+        titleBar.getChildren().addAll(lblWindowTitle, btnWindowClose);
+        titleBar.getStyleClass().add("title-bar");
+        titleBar.setAlignment(Pos.CENTER_LEFT);
+        titleBar.setPrefHeight(TITLE_BAR_HEIGHT);
+        titleBar.setMinHeight(TITLE_BAR_HEIGHT);
+        installWindowDrag(titleBar);
+        root.setTop(titleBar);
 
         // Status header: reserved status-illustration slot + title/subtitle.
         lblStatus.getStyleClass().add("status-title");
@@ -877,9 +1036,12 @@ final class JavaFxUpdateView implements UpdateView {
         detailsPane.setAnimated(false);
         detailsPane.setExpanded(debug);
 
-        // Root layout — the status header (illustration + text) is the first row.
-        root.setPadding(new Insets(18, 22, 18, 22));
-        root.getChildren().addAll(statusHeader, overallArea, dlArea, detailsPane);
+        // Content column — the status header (illustration + text) is the first
+        // row, below the custom title bar. Same children and padding as the old
+        // root, so the content layout is unchanged by the frameless window.
+        VBox content = new VBox(8);
+        content.setPadding(new Insets(18, 22, 18, 22));
+        content.getChildren().addAll(statusHeader, overallArea, dlArea, detailsPane);
 
         // Debug footer — only present in debug mode, enabled once the flow allows
         // the user to close.
@@ -892,7 +1054,7 @@ final class JavaFxUpdateView implements UpdateView {
             HBox bottom = new HBox(btnClose);
             bottom.getStyleClass().add("debug-footer");
             bottom.setAlignment(Pos.CENTER_RIGHT);
-            root.getChildren().addAll(footerLine, bottom);
+            content.getChildren().addAll(footerLine, bottom);
         }
 
         // Persistent bottom copyright line — centred and muted.
@@ -902,16 +1064,26 @@ final class JavaFxUpdateView implements UpdateView {
         lblFooter.setAlignment(Pos.BOTTOM_CENTER);
         lblFooter.setText(FOOTER_COPYRIGHT);
         VBox.setVgrow(lblFooter, Priority.ALWAYS);
-        root.getChildren().add(lblFooter);
+        content.getChildren().add(lblFooter);
+        root.setCenter(content);
 
-        // Apply the shared visual system (ui.css) — normal and debug alike.
-        scene = new Scene(root, WINDOW_WIDTH, WINDOW_HEIGHT_COLLAPSED);
+        // Rounded frameless window: wrap the BorderPane in a transparent
+        // StackPane that reserves the shadow margin, and make the scene fill
+        // transparent so the desktop shows through the rounded corners. The
+        // scene is sized WINDOW_WIDTH wide + shadow margins so the client area
+        // (the BorderPane) keeps its exact 520px layout width.
+        frame.getStyleClass().add("window-frame");
+        frame.getChildren().add(root);
+        scene = new Scene(frame,
+                WINDOW_WIDTH + 2 * SHADOW_SIDE,
+                collapsedSceneHeight());
+        scene.setFill(Color.TRANSPARENT);
         if (stylesheet != null) {
             scene.getStylesheets().add(stylesheet);
         }
         stage.setScene(scene);
-        stage.setMinWidth(WINDOW_WIDTH - 40);
-        stage.setMinHeight(WINDOW_HEIGHT_COLLAPSED);
+        stage.setMinWidth(WINDOW_WIDTH);
+        stage.setMinHeight(collapsedSceneHeight());
         detailsPane.expandedProperty().addListener((obs, wasExpanded, expanded) ->
                 applyWindowHeight());
     }
@@ -937,16 +1109,14 @@ final class JavaFxUpdateView implements UpdateView {
         if (stage.getScene() == null || !stage.isShowing()) {
             return;
         }
-        double chrome = windowChrome();
-        if (chrome <= 0) {
-            return;
-        }
         Scene scene = stage.getScene();
         scene.getRoot().applyCss();
         double width = scene.getWidth();
         double pref = width > 0 ? scene.getRoot().prefHeight(width) : scene.getRoot().prefHeight(-1);
-        double target = Math.max(pref, WINDOW_HEIGHT_COLLAPSED) + chrome;
-        fitWindowToScreen(target);
+        // The frame's preferred height already includes the custom title bar and
+        // the shadow margin (it lives inside the scene), so the rounded window
+        // is sized straight to it — no OS chrome to add.
+        fitWindowToScreen(Math.max(pref, collapsedSceneHeight()));
     }
 
     /** Size the window to the given total height and keep it centred on the
@@ -954,10 +1124,9 @@ final class JavaFxUpdateView implements UpdateView {
     private void fitWindowToScreen(double targetHeight) {
         Rectangle2D bounds = currentScreenVisualBounds();
         double margin = 24;
-        double maxHeight = Math.max(WINDOW_HEIGHT_COLLAPSED, bounds.getHeight() - margin);
+        double collapsed = collapsedSceneHeight();
+        double maxHeight = Math.max(collapsed, bounds.getHeight() - margin);
         double maxWidth = Math.max(WINDOW_WIDTH, bounds.getWidth() - margin);
-        double chrome = windowChrome();
-        double collapsed = WINDOW_HEIGHT_COLLAPSED + chrome;
         double h = Math.min(Math.max(targetHeight, collapsed), maxHeight);
         double w = Math.min(stage.getWidth(), maxWidth);
         if (Math.abs(stage.getHeight() - h) > 1.0) {
@@ -992,19 +1161,5 @@ final class JavaFxUpdateView implements UpdateView {
             }
         }
         return screen.getVisualBounds();
-    }
-
-    /** Vertical window chrome (title bar + borders) between the stage and the
-     *  scene, measured once. */
-    private double windowChrome() {
-        if (chrome > 0) {
-            return chrome;
-        }
-        Scene scene = stage.getScene();
-        if (scene == null || scene.getHeight() <= 0 || !stage.isShowing()) {
-            return 0;
-        }
-        chrome = stage.getHeight() - scene.getHeight();
-        return chrome;
     }
 }
