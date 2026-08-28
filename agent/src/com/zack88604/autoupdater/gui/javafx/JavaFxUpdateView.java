@@ -6,10 +6,16 @@ import com.zack88604.autoupdater.gui.api.UpdateSummary;
 import com.zack88604.autoupdater.gui.api.UpdateUiState;
 import com.zack88604.autoupdater.gui.api.UpdateView;
 import javafx.animation.Animation;
+import javafx.animation.AnimationTimer;
 import javafx.animation.FadeTransition;
+import javafx.animation.Interpolator;
+import javafx.animation.KeyFrame;
+import javafx.animation.KeyValue;
 import javafx.animation.ParallelTransition;
 import javafx.animation.ScaleTransition;
+import javafx.animation.Timeline;
 import javafx.application.Platform;
+import javafx.beans.binding.Bindings;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.geometry.Rectangle2D;
@@ -28,9 +34,12 @@ import javafx.scene.image.ImageView;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import javafx.scene.layout.Pane;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
+import javafx.scene.shape.Rectangle;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
 import javafx.stage.StageStyle;
@@ -106,6 +115,16 @@ final class JavaFxUpdateView implements UpdateView {
     private static final double HEADER_FADE_MS = 130;
     private static final double ENTRANCE_SCALE_FROM = 0.94;
 
+    // Progress motion is deliberately short: every new real snapshot interrupts
+    // the existing keyframes and retargets from the value currently on screen.
+    // The two Timeline instances are created once and reused for the lifetime of
+    // the view, so high-frequency render calls cannot build an animation queue.
+    private static final double PROGRESS_TWEEN_MS = 240;
+    private static final double OVERALL_SHIMMER_SWEEP_MS = 1500;
+    private static final double OVERALL_SHIMMER_PAUSE_MS = 1050;
+    private static final double FILE_SHIMMER_SWEEP_MS = 880;
+    private static final double FILE_SHIMMER_PAUSE_MS = 620;
+
     // Quit-update dim overlay (UI修复.md 一): a ~120ms fade in, matching the
     // existing micro-animation budget. While the "Quit update?" confirmation
     // dialog is open the main window is dimmed to OVERLAY_OPACITY so the dialog
@@ -169,13 +188,59 @@ final class JavaFxUpdateView implements UpdateView {
     private final Label lblDescription = new Label("");
     private final HBox overallArea = new HBox(6);
     private final ProgressBar overallBar = new ProgressBar(0);
+    private final StackPane overallBarStack = new StackPane();
+    private final Pane overallShimmerLayer = new Pane();
+    private final Region overallShimmer = new Region();
     private final Label lblOverallPct = new Label("");
 
     // Current-file / per-download area
     private final VBox dlArea = new VBox(4);
     private final Label lblDlFile = new Label();
     private final ProgressBar dlBar = new ProgressBar(0);
+    private final StackPane dlBarStack = new StackPane();
+    private final Pane dlShimmerLayer = new Pane();
+    private final Region dlShimmer = new Region();
     private final Label lblDlSpeed = new Label("");
+
+    // One reusable interpolation Timeline per bar. They are stopped on every
+    // retarget, reset, file switch and terminal transition.
+    private final Timeline overallProgressTween = new Timeline();
+    private final Timeline fileProgressTween = new Timeline();
+    private boolean overallProgressInitialized;
+    private boolean fileProgressInitialized;
+    private double lastOverallTarget = Double.NaN;
+    private double lastFileTarget = Double.NaN;
+    private String interpolatedFilePath;
+
+    // ERROR snapshots intentionally carry an inactive DownloadProgress. Keep the
+    // last real, non-zero values in the View so terminal rendering can preserve
+    // useful information without changing UpdateUiState or the reducer.
+    private boolean hasMeaningfulOverallProgress;
+    private double lastMeaningfulOverallProgress;
+    private boolean hasMeaningfulFileProgress;
+    private double lastMeaningfulFileProgress;
+    private String lastMeaningfulFilePath;
+    private String lastMeaningfulFileSpeed;
+
+    // A single pulse-driven shimmer clock animates both highlights. Unlike a
+    // Timeline per render, it has a fixed allocation and is started/stopped only
+    // when entering/leaving DOWNLOADING.
+    private long shimmerEpochNanos;
+    private boolean shimmerRunning;
+    private final AnimationTimer shimmerTimer = new AnimationTimer() {
+        @Override
+        public void handle(long now) {
+            if (shimmerEpochNanos == 0L) {
+                shimmerEpochNanos = now;
+            }
+            double elapsedMs = (now - shimmerEpochNanos) / 1_000_000.0;
+            positionShimmer(overallShimmer, overallShimmerLayer, elapsedMs,
+                    OVERALL_SHIMMER_SWEEP_MS, OVERALL_SHIMMER_PAUSE_MS);
+            positionShimmer(dlShimmer, dlShimmerLayer, elapsedMs,
+                    FILE_SHIMMER_SWEEP_MS, FILE_SHIMMER_PAUSE_MS);
+            updateShimmerVisibility();
+        }
+    };
 
     // Counters backing the informational subtitles. Derived from the snapshot's
     // structured fields (CHECKING status "{checked}/{total}" and per-file phase
@@ -312,6 +377,7 @@ final class JavaFxUpdateView implements UpdateView {
         applyHeader(state);
         applyOverall(state);
         applyDownload(state);
+        updateShimmerVisibility();
         applyServer(state);
         applyLog(state);
         applyCloseButton(state);
@@ -328,6 +394,8 @@ final class JavaFxUpdateView implements UpdateView {
             headerFade = null;
         }
         stopQuitOverlayFade();
+        stopProgressAnimations();
+        stopShimmer();
         stage.close();
     }
 
@@ -415,18 +483,67 @@ final class JavaFxUpdateView implements UpdateView {
     /** Set the overall progress bar and percentage for determinate phases. */
     private void applyOverall(UpdateUiState state) {
         UpdatePhase p = state.getPhase();
-        if (p == UpdatePhase.PREPARING || p == UpdatePhase.CLEANING
-                || p == UpdatePhase.ERROR) {
-            return;   // setPhase already configured the indeterminate/error bar
+        if (p == UpdatePhase.ERROR) {
+            stopProgressTween(overallProgressTween);
+            if (!hasMeaningfulOverallProgress
+                    && !state.isOverallProgressIndeterminate()
+                    && state.getOverallProgressPercent() > 0) {
+                hasMeaningfulOverallProgress = true;
+                lastMeaningfulOverallProgress =
+                        clamp(state.getOverallProgressPercent()) / 100.0;
+            }
+            if (hasMeaningfulOverallProgress) {
+                setProgressDirect(overallBar, lastMeaningfulOverallProgress);
+                overallProgressInitialized = true;
+                lastOverallTarget = lastMeaningfulOverallProgress;
+                lblOverallPct.setText(percentText(lastMeaningfulOverallProgress));
+                showOverallPercent();
+                overallArea.setVisible(true);
+            } else {
+                overallArea.setVisible(false);
+            }
+            return;
         }
-        int value = clamp(state.getOverallProgressPercent());
-        overallBar.setProgress(value / 100.0);
-        lblOverallPct.setText(value + "%");
+        if (p == UpdatePhase.PREPARING || p == UpdatePhase.CLEANING) {
+            return;   // setPhase already configured the indeterminate bar
+        }
+        double target = clamp(state.getOverallProgressPercent()) / 100.0;
+        if (target > 0.0) {
+            hasMeaningfulOverallProgress = true;
+            lastMeaningfulOverallProgress = target;
+        }
+        boolean animate = p == UpdatePhase.DOWNLOADING
+                && overallProgressInitialized
+                && !Double.isNaN(lastOverallTarget)
+                && target >= lastOverallTarget;
+        boolean targetChanged = Double.isNaN(lastOverallTarget)
+                || Math.abs(target - lastOverallTarget) >= 0.0001;
+        if (targetChanged || overallProgressTween.getStatus() != Animation.Status.RUNNING) {
+            setProgressTarget(overallBar, overallProgressTween, target, animate);
+        }
+        overallProgressInitialized = true;
+        lastOverallTarget = target;
+        lblOverallPct.setText(percentText(target));
+        overallArea.setVisible(true);
     }
 
     /** Present the per-file / agent download snapshot (current-file area). */
     private void applyDownload(UpdateUiState state) {
         DownloadProgress dl = state.getDownloadProgress();
+        if (state.getPhase() == UpdatePhase.ERROR) {
+            stopProgressTween(fileProgressTween);
+            if (hasMeaningfulFileProgress) {
+                lblDlFile.setText(lastMeaningfulFilePath == null ? "" : lastMeaningfulFilePath);
+                lblDlSpeed.setText(lastMeaningfulFileSpeed == null ? "" : lastMeaningfulFileSpeed);
+                setProgressDirect(dlBar, lastMeaningfulFileProgress);
+                fileProgressInitialized = true;
+                lastFileTarget = lastMeaningfulFileProgress;
+                showDownloadArea();
+            } else {
+                hideDownloadArea();
+            }
+            return;
+        }
         if (!dl.isActive()) {
             hideDownloadArea();
             updateStatusImage(phase);
@@ -454,11 +571,42 @@ final class JavaFxUpdateView implements UpdateView {
         }
         lblDlFile.setText(dl.getPath() == null ? "" : dl.getPath());
         if (dl.getTotalBytes() > 0) {
-            int pct = clamp((int) (dl.getDownloadedBytes() * 100 / dl.getTotalBytes()));
-            dlBar.setProgress(pct / 100.0);
+            double target = clampProgress(dl.getDownloadedBytes() / (double) dl.getTotalBytes());
+            boolean fileChanged = interpolatedFilePath == null
+                    || !interpolatedFilePath.equals(dl.getPath());
+            if (fileChanged) {
+                stopProgressTween(fileProgressTween);
+                fileProgressInitialized = false;
+                lastFileTarget = Double.NaN;
+                interpolatedFilePath = dl.getPath();
+                // A new 0% file must not inherit the previous file's ERROR cache.
+                hasMeaningfulFileProgress = false;
+                lastMeaningfulFilePath = null;
+                lastMeaningfulFileSpeed = null;
+            }
+            if (target > 0.0) {
+                hasMeaningfulFileProgress = true;
+                lastMeaningfulFileProgress = target;
+                lastMeaningfulFilePath = dl.getPath();
+                lastMeaningfulFileSpeed = formatSpeed(dl.getBytesPerSecond());
+            }
+            boolean animate = phase == UpdatePhase.DOWNLOADING
+                    && fileProgressInitialized
+                    && !Double.isNaN(lastFileTarget)
+                    && target >= lastFileTarget;
+            boolean targetChanged = Double.isNaN(lastFileTarget)
+                    || Math.abs(target - lastFileTarget) >= 0.0001;
+            if (targetChanged || fileProgressTween.getStatus() != Animation.Status.RUNNING) {
+                setProgressTarget(dlBar, fileProgressTween, target, animate);
+            }
+            fileProgressInitialized = true;
+            lastFileTarget = target;
         } else {
             // Unknown content-length: indeterminate per-file bar.
+            stopProgressTween(fileProgressTween);
             dlBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
+            fileProgressInitialized = false;
+            lastFileTarget = Double.NaN;
         }
         lblDlSpeed.setText(formatSpeed(dl.getBytesPerSecond()));
         showDownloadArea();
@@ -527,11 +675,22 @@ final class JavaFxUpdateView implements UpdateView {
      */
     private void setPhase(UpdatePhase p) {
         if (phase != p) {
+            UpdatePhase previous = phase;
             phase = p;
             animateHeaderFade();
             root.getStyleClass().removeAll("success-state", "error-state");
+            if (p != UpdatePhase.DOWNLOADING) {
+                stopShimmer();
+            }
+            if (p == UpdatePhase.SUCCESS || p == UpdatePhase.ERROR) {
+                stopProgressAnimations();
+            }
             switch (p) {
             case PREPARING:
+                overallArea.setVisible(true);
+                if (previous == UpdatePhase.SUCCESS || previous == UpdatePhase.ERROR) {
+                    clearRememberedProgress();
+                }
             case CLEANING:
                 // Indeterminate phases hide the percentage entirely, so a stale
                 // value (e.g. the previous 55%) never lingers beside the bar.
@@ -545,6 +704,13 @@ final class JavaFxUpdateView implements UpdateView {
                 hideDownloadArea();
                 showOverallPercent();
                 logArea.setPrefRowCount(6);
+                overallArea.setVisible(true);
+                if (p == UpdatePhase.DOWNLOADING) {
+                    // The first real value in this phase is an anchor, not a
+                    // transition from an unrelated CHECKING visual.
+                    overallProgressInitialized = false;
+                    startShimmer();
+                }
                 break;
             case SUCCESS:
                 hideDownloadArea();
@@ -553,14 +719,9 @@ final class JavaFxUpdateView implements UpdateView {
                 root.getStyleClass().add("success-state");
                 break;
             case ERROR:
-                hideDownloadArea();
-                // Error hides the overall progress bar, resets any residue,
-                // expands Details and shows a few more log rows for the failure
-                // context. The bar's row stays managed (only its visibility is
-                // toggled) so the Details pane below keeps a fixed position.
-                overallBar.setProgress(0);
-                lblOverallPct.setText("");
-                overallArea.setVisible(false);
+                // applyOverall/applyDownload restore the last meaningful real
+                // values. They stay static and the error-state class recolours
+                // only the completed fill.
                 logArea.setPrefRowCount(10);
                 detailsPane.setExpanded(true);
                 root.getStyleClass().add("error-state");
@@ -597,10 +758,107 @@ final class JavaFxUpdateView implements UpdateView {
     /** Hide and clear the current-file area. The row stays managed so the
      *  Details pane below keeps a fixed position. */
     private void hideDownloadArea() {
+        stopProgressTween(fileProgressTween);
+        fileProgressInitialized = false;
+        lastFileTarget = Double.NaN;
+        interpolatedFilePath = null;
         dlArea.setVisible(false);
         lblDlFile.setText("");
         dlBar.setProgress(0);
         lblDlSpeed.setText("");
+    }
+
+    private void setProgressTarget(ProgressBar bar, Timeline tween,
+                                   double target, boolean animate) {
+        double safeTarget = clampProgress(target);
+        double current = clampProgress(bar.getProgress());
+        stopProgressTween(tween);
+        if (!animate || Math.abs(safeTarget - current) < 0.001) {
+            setProgressDirect(bar, safeTarget);
+            return;
+        }
+        tween.getKeyFrames().setAll(
+                new KeyFrame(Duration.ZERO, new KeyValue(bar.progressProperty(), current)),
+                new KeyFrame(Duration.millis(PROGRESS_TWEEN_MS),
+                        new KeyValue(bar.progressProperty(), safeTarget, Interpolator.EASE_OUT)));
+        tween.playFromStart();
+    }
+
+    private static void setProgressDirect(ProgressBar bar, double value) {
+        bar.setProgress(clampProgress(value));
+    }
+
+    private static double clampProgress(double value) {
+        return Math.max(0.0, Math.min(1.0, value));
+    }
+
+    private static String percentText(double progress) {
+        return Math.round(clampProgress(progress) * 100.0) + "%";
+    }
+
+    private static void stopProgressTween(Timeline tween) {
+        tween.stop();
+        tween.getKeyFrames().clear();
+    }
+
+    private void stopProgressAnimations() {
+        stopProgressTween(overallProgressTween);
+        stopProgressTween(fileProgressTween);
+    }
+
+    private void clearRememberedProgress() {
+        hasMeaningfulOverallProgress = false;
+        lastMeaningfulOverallProgress = 0.0;
+        hasMeaningfulFileProgress = false;
+        lastMeaningfulFileProgress = 0.0;
+        lastMeaningfulFilePath = null;
+        lastMeaningfulFileSpeed = null;
+        interpolatedFilePath = null;
+        lastOverallTarget = Double.NaN;
+        lastFileTarget = Double.NaN;
+        overallProgressInitialized = false;
+        fileProgressInitialized = false;
+    }
+
+    private void startShimmer() {
+        if (shimmerRunning) {
+            return;
+        }
+        shimmerRunning = true;
+        shimmerEpochNanos = 0L;
+        shimmerTimer.start();
+    }
+
+    private void stopShimmer() {
+        if (shimmerRunning) {
+            shimmerTimer.stop();
+            shimmerRunning = false;
+        }
+        shimmerEpochNanos = 0L;
+        overallShimmer.setVisible(false);
+        dlShimmer.setVisible(false);
+    }
+
+    private void updateShimmerVisibility() {
+        boolean downloading = phase == UpdatePhase.DOWNLOADING && shimmerRunning;
+        overallShimmer.setVisible(downloading && overallArea.isVisible()
+                && overallBar.getProgress() > 0.0 && overallBar.getProgress() <= 1.0);
+        dlShimmer.setVisible(downloading && dlArea.isVisible()
+                && dlBar.getProgress() > 0.0 && dlBar.getProgress() <= 1.0);
+    }
+
+    private static void positionShimmer(Region shimmer, Pane layer,
+                                        double elapsedMs, double sweepMs, double pauseMs) {
+        double cycleMs = sweepMs + pauseMs;
+        double withinCycle = elapsedMs % cycleMs;
+        if (withinCycle >= sweepMs) {
+            shimmer.setOpacity(0.0);
+            return;
+        }
+        shimmer.setOpacity(1.0);
+        double fraction = withinCycle / sweepMs;
+        double distance = layer.getWidth() + shimmer.getWidth();
+        shimmer.setTranslateX(-shimmer.getWidth() + distance * fraction);
     }
 
     // ── Status illustration ────────────────────────────────────────
@@ -1104,8 +1362,10 @@ final class JavaFxUpdateView implements UpdateView {
         overallArea.getStyleClass().add("overall-progress");
         lblOverallPct.getStyleClass().add("pct");
         lblOverallPct.setPrefWidth(44);
-        HBox.setHgrow(overallBar, Priority.ALWAYS);
-        overallArea.getChildren().addAll(overallBar, lblOverallPct);
+        configureShimmerBar(overallBarStack, overallBar, overallShimmerLayer,
+                overallShimmer, "overall-shimmer", 46.0, 8.0);
+        HBox.setHgrow(overallBarStack, Priority.ALWAYS);
+        overallArea.getChildren().addAll(overallBarStack, lblOverallPct);
         overallArea.setAlignment(Pos.CENTER_LEFT);
         overallBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
 
@@ -1114,8 +1374,10 @@ final class JavaFxUpdateView implements UpdateView {
         dlArea.getStyleClass().add("file-area");
         lblDlFile.getStyleClass().add("file-path");
         dlBar.getStyleClass().add("file-progress");
+        configureShimmerBar(dlBarStack, dlBar, dlShimmerLayer,
+                dlShimmer, "file-shimmer", 38.0, 6.0);
         lblDlSpeed.getStyleClass().add("download-speed");
-        dlArea.getChildren().addAll(lblDlFile, dlBar, lblDlSpeed);
+        dlArea.getChildren().addAll(lblDlFile, dlBarStack, lblDlSpeed);
         dlArea.setVisible(false);
 
         // Details area: Server URL, Game Directory and the full log. Collapsed
@@ -1189,6 +1451,41 @@ final class JavaFxUpdateView implements UpdateView {
         stage.setMinHeight(collapsedSceneHeight());
         detailsPane.expandedProperty().addListener((obs, wasExpanded, expanded) ->
                 applyWindowHeight());
+    }
+
+    /** Build a flat ProgressBar with a mouse-transparent highlight layer. The
+     * layer is clipped to the interpolated completed width, so the highlight can
+     * never cross into the grey track even while the bar is moving. */
+    private static void configureShimmerBar(StackPane stack, ProgressBar bar,
+                                            Pane layer, Region shimmer,
+                                            String shimmerClass,
+                                            double shimmerWidth, double barHeight) {
+        stack.setMaxWidth(Double.MAX_VALUE);
+        stack.setPrefHeight(barHeight);
+        stack.setMinHeight(barHeight);
+        stack.setMaxHeight(barHeight);
+        bar.setMaxWidth(Double.MAX_VALUE);
+
+        layer.setMouseTransparent(true);
+        layer.setMaxWidth(Double.MAX_VALUE);
+        shimmer.getStyleClass().addAll("progress-shimmer", shimmerClass);
+        shimmer.setManaged(false);
+        shimmer.setVisible(false);
+        shimmer.resize(shimmerWidth, barHeight);
+        shimmer.setPrefSize(shimmerWidth, barHeight);
+        shimmer.setMinSize(shimmerWidth, barHeight);
+        shimmer.setMaxSize(shimmerWidth, barHeight);
+        layer.getChildren().add(shimmer);
+
+        Rectangle completedClip = new Rectangle();
+        completedClip.heightProperty().bind(layer.heightProperty());
+        completedClip.widthProperty().bind(Bindings.createDoubleBinding(
+                () -> layer.getWidth() * clampProgress(bar.getProgress()),
+                layer.widthProperty(), bar.progressProperty()));
+        completedClip.setArcWidth(barHeight);
+        completedClip.setArcHeight(barHeight);
+        layer.setClip(completedClip);
+        stack.getChildren().addAll(bar, layer);
     }
 
     /**

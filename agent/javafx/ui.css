@@ -222,6 +222,33 @@
     -fx-background-color: #5DD35D;
 }
 
+/* Narrow feathered highlight drawn above the fill. Java clips this layer to
+   the current completed width, so none of the white reaches the grey track.
+   The file highlight is intentionally a little clearer; overall stays quieter
+   to preserve the visual hierarchy. */
+.progress-shimmer {
+    -fx-background-insets: 0;
+    -fx-background-radius: 4px;
+}
+
+.overall-shimmer {
+    -fx-background-color: linear-gradient(to right,
+        rgba(255,255,255,0.00) 0%,
+        rgba(255,255,255,0.08) 28%,
+        rgba(255,255,255,0.30) 50%,
+        rgba(255,255,255,0.08) 72%,
+        rgba(255,255,255,0.00) 100%);
+}
+
+.file-shimmer {
+    -fx-background-color: linear-gradient(to right,
+        rgba(255,255,255,0.00) 0%,
+        rgba(255,255,255,0.14) 26%,
+        rgba(255,255,255,0.48) 50%,
+        rgba(255,255,255,0.14) 74%,
+        rgba(255,255,255,0.00) 100%);
+}
+
 /* ── Current-file area ──────────────────────────────────────────── */
 
 .file-path {
@@ -474,6 +501,13 @@
    primary emphasis (round-2 refinement). */
 .root.error-state .status-description {
     -fx-text-fill: #C56F6F;
+}
+
+/* Muted, slightly desaturated failure red: clear error semantics without a
+   bright alarm-red stripe competing with the error title and log context. */
+.root.error-state .progress-bar > .bar,
+.root.error-state .progress-bar:indeterminate > .bar {
+    -fx-background-color: #B76064;
 }
 
 /* ── Quit-update Alert shares the same visual system ──────────────── */
