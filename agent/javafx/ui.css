@@ -74,6 +74,23 @@
     -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.40), 14, 0.0, 0, 6);
 }
 
+/* ── Quit-update dim overlay (UI修复.md 一) ─────────────────────────
+   While the "Quit update?" confirmation dialog is open, the main window is
+   dimmed by a semi-transparent overlay. It is a second child of the scene
+   frame (which reserves the shadow margin via its padding), so it covers
+   exactly the rounded client area — never the shadow margin or the transparent
+   corners. Rounded to match the window so the corners stay clear. The overlay
+   is opaque to mouse picking (pickOnBounds), so the controls beneath are
+   unreachable while it is shown; the modal dialog already blocks them too.
+   The background is SOLID black: the dimming level comes solely from the
+   overlay node's opacity (faded to JavaFxUpdateView.OVERLAY_OPACITY), so the
+   two never multiply each other down. */
+.quit-overlay {
+    -fx-background-color: rgba(0, 0, 0, 1.0);
+    -fx-background-insets: 0;
+    -fx-background-radius: 12px;
+}
+
 /* ── Status ─────────────────────────────────────────────────────── */
 
 .status-title {

@@ -106,6 +106,17 @@ final class JavaFxUpdateView implements UpdateView {
     private static final double HEADER_FADE_MS = 130;
     private static final double ENTRANCE_SCALE_FROM = 0.94;
 
+    // Quit-update dim overlay (UI修复.md 一): a ~120ms fade in, matching the
+    // existing micro-animation budget. While the "Quit update?" confirmation
+    // dialog is open the main window is dimmed to OVERLAY_OPACITY so the dialog
+    // becomes the clear visual focus. The overlay's CSS background is solid
+    // black, so OVERLAY_OPACITY is the *effective* dimming level (0.35 = 35%
+    // black) — deepened from 0.25 at the user's request; the two are never
+    // multiplied, which had diluted the original 0.25×0.25 to a barely visible
+    // ~6%.
+    private static final double OVERLAY_FADE_MS = 120;
+    private static final double OVERLAY_OPACITY = 0.35;
+
     private static final String FOOTER_COPYRIGHT =
             "Developed by Zack88604 · MIT License · UI redesign by Eternity_Riguru";
 
@@ -200,6 +211,15 @@ final class JavaFxUpdateView implements UpdateView {
     private Animation statusFade;
     private Animation headerFade;
 
+    // Quit-update dim overlay (UI修复.md 一): fills the main window's rounded
+    // client area and fades in while the "Quit update?" confirmation dialog is
+    // open, so the dialog is the clear visual focus. It sits on top of the
+    // window root inside the scene frame and is pickable over its whole area, so
+    // the controls beneath are unreachable while it is shown. Faded out and
+    // hidden once the dialog closes (Keep updating / Skip update / dismiss).
+    private final StackPane quitOverlay = new StackPane();
+    private Animation quitOverlayFade;
+
     // Root layout — carries the .success-state / .error-state state classes.
     // A BorderPane so the custom title bar (drag region + ×) spans the full
     // window width above the padded content column (frameless window).
@@ -250,12 +270,33 @@ final class JavaFxUpdateView implements UpdateView {
 
     // ── UpdateView ────────────────────────────────────────────────
 
-    /** Show the window. Must be called on the JavaFX Application Thread. */
+    /** Show the window. Must be called on the JavaFX Application Thread.
+     *  <p>This is the ONLY place the window position is set: the freshly shown
+     *  window is centred once. Every later render resizes content but never
+     *  moves the window, so a dragged window stays where the user put it
+     *  (UI修复.md 二) — {@link #resizeToContent()} is strictly size-only.</p> */
     @Override
     public void open() {
         stage.show();
-        stage.centerOnScreen();
+        centerFirstOpen();
         applyWindowHeight();
+    }
+
+    /**
+     * Centre the freshly shown window once on the screen that currently contains
+     * it. JavaFX's own {@link Stage#centerOnScreen()} puts the window a third of
+     * the way down the screen instead of at the geometric centre; the
+     * pre-refactor {@code fitWindowToScreen} centred geometrically, so this keeps
+     * first-open placement identical to that while remaining strictly a
+     * first-show-only operation — later renders never move the window
+     * (UI修复.md 二).
+     */
+    private void centerFirstOpen() {
+        Rectangle2D bounds = currentScreenVisualBounds();
+        double x = bounds.getMinX() + (bounds.getWidth() - stage.getWidth()) / 2.0;
+        double y = bounds.getMinY() + (bounds.getHeight() - stage.getHeight()) / 2.0;
+        stage.setX(x);
+        stage.setY(y);
     }
 
     /**
@@ -286,6 +327,7 @@ final class JavaFxUpdateView implements UpdateView {
             headerFade.stop();
             headerFade = null;
         }
+        stopQuitOverlayFade();
         stage.close();
     }
 
@@ -881,17 +923,70 @@ final class JavaFxUpdateView implements UpdateView {
      * shares the main window's stylesheet; Keep updating renders as the primary
      * green action and Skip update as a quiet, borderless secondary
      * (第二轮 ui美化.md 三) — neither is a red primary button.
+     *
+     * <p>While the dialog is open the main window is dimmed by the quit overlay
+     * (UI修复.md 一): {@code showQuitOverlay()} fades it in just before the
+     * dialog appears and {@code hideQuitOverlay()} fades it out as soon as the
+     * dialog closes, whatever the user chose.</p>
      */
     private void confirmQuit() {
         listener.beginCloseConfirmation();
+        showQuitOverlay();
         Alert alert = createQuitAlert();
         Optional<ButtonType> choice = alert.showAndWait();
+        hideQuitOverlay();
         if (choice.isPresent() && choice.get() == quitSkipType) {
             listener.userRequestedClose();
             stage.close();
         } else {
             // "Keep updating", or the dialog was dismissed — resume the update.
             listener.cancelCloseConfirmation();
+        }
+    }
+
+    // ── Quit-update dim overlay ──────────────────────────────────
+
+    /**
+     * Fade the quit overlay in over the main window. Runs on the FX thread just
+     * before the confirmation dialog appears, so the dialog is the clear visual
+     * focus. The overlay is made visible synchronously (so it is already in place
+     * when the modal dialog opens) and only its opacity animates.
+     */
+    private void showQuitOverlay() {
+        stopQuitOverlayFade();
+        quitOverlay.setVisible(true);
+        quitOverlay.setOpacity(0.0);
+        FadeTransition fade = new FadeTransition(Duration.millis(OVERLAY_FADE_MS), quitOverlay);
+        fade.setFromValue(0.0);
+        fade.setToValue(OVERLAY_OPACITY);
+        fade.setOnFinished(e -> quitOverlayFade = null);
+        quitOverlayFade = fade;
+        fade.play();
+    }
+
+    /**
+     * Remove the quit overlay. Called as soon as the dialog closes (Keep
+     * updating / Skip update / dismiss). The overlay is hidden synchronously on
+     * the FX thread — never faded out over time — so no residue can linger if
+     * the caller then blocks the FX thread (e.g. a harness joining a clicker
+     * thread that polls {@code isVisible}), and a re-opened dialog simply fades
+     * it in again from its reset state. The light fade is kept on the way in
+     * only, which stays within the "no obvious animation burden" bound.
+     */
+    private void hideQuitOverlay() {
+        stopQuitOverlayFade();
+        if (!quitOverlay.isVisible()) {
+            return;
+        }
+        quitOverlay.setVisible(false);
+        quitOverlay.setOpacity(OVERLAY_OPACITY);   // reset for the next show
+    }
+
+    /** Stop any in-flight overlay fade (the next show/hide starts cleanly). */
+    private void stopQuitOverlayFade() {
+        if (quitOverlayFade != null) {
+            quitOverlayFade.stop();
+            quitOverlayFade = null;
         }
     }
 
@@ -1073,7 +1168,15 @@ final class JavaFxUpdateView implements UpdateView {
         // scene is sized WINDOW_WIDTH wide + shadow margins so the client area
         // (the BorderPane) keeps its exact 520px layout width.
         frame.getStyleClass().add("window-frame");
-        frame.getChildren().add(root);
+        // Quit-update dim overlay: the scene frame reserves the shadow margin via
+        // its padding, so a second child of the same StackPane fills exactly the
+        // rounded client area the BorderPane covers — never the shadow margin or
+        // the transparent corners — and stays correct as the window resizes.
+        // Added after `root` so it stacks on top.
+        quitOverlay.getStyleClass().add("quit-overlay");
+        quitOverlay.setVisible(false);
+        quitOverlay.setPickOnBounds(true);   // unreachable controls underneath
+        frame.getChildren().addAll(root, quitOverlay);
         scene = new Scene(frame,
                 WINDOW_WIDTH + 2 * SHADOW_SIDE,
                 collapsedSceneHeight());
@@ -1102,8 +1205,14 @@ final class JavaFxUpdateView implements UpdateView {
     /**
      * Resize the window so the client area matches the content's preferred
      * height — never a fixed expanded height, so Error/Debug states take exactly
-     * the space they need. The final size is clamped to the visible screen and
-     * the window re-centred (see {@link #fitWindowToScreen}).
+     * the space they need. The final size is clamped to the visible screen, but
+     * the window position is NEVER touched here: re-centring lives exclusively
+     * in {@link #open()} (first show only). A content-driven resize must never
+     * yank a dragged window back to the screen centre, and high-frequency
+     * progress renders must never move the window (UI修复.md 二). The frame's
+     * preferred height already includes the custom title bar and the shadow
+     * margin (it lives inside the scene), so the rounded window is sized
+     * straight to it — no OS chrome to add.
      */
     private void resizeToContent() {
         if (stage.getScene() == null || !stage.isShowing()) {
@@ -1113,38 +1222,18 @@ final class JavaFxUpdateView implements UpdateView {
         scene.getRoot().applyCss();
         double width = scene.getWidth();
         double pref = width > 0 ? scene.getRoot().prefHeight(width) : scene.getRoot().prefHeight(-1);
-        // The frame's preferred height already includes the custom title bar and
-        // the shadow margin (it lives inside the scene), so the rounded window
-        // is sized straight to it — no OS chrome to add.
-        fitWindowToScreen(Math.max(pref, collapsedSceneHeight()));
-    }
-
-    /** Size the window to the given total height and keep it centred on the
-     *  screen that currently contains it, clamped to the visible screen. */
-    private void fitWindowToScreen(double targetHeight) {
         Rectangle2D bounds = currentScreenVisualBounds();
         double margin = 24;
         double collapsed = collapsedSceneHeight();
         double maxHeight = Math.max(collapsed, bounds.getHeight() - margin);
         double maxWidth = Math.max(WINDOW_WIDTH, bounds.getWidth() - margin);
-        double h = Math.min(Math.max(targetHeight, collapsed), maxHeight);
+        double h = Math.min(Math.max(pref, collapsed), maxHeight);
         double w = Math.min(stage.getWidth(), maxWidth);
         if (Math.abs(stage.getHeight() - h) > 1.0) {
             stage.setHeight(h);
         }
         if (Math.abs(stage.getWidth() - w) > 1.0) {
             stage.setWidth(w);
-        }
-        if (bounds.contains(stage.getX() + stage.getWidth() / 2.0,
-                            stage.getY() + stage.getHeight() / 2.0)) {
-            double x = bounds.getMinX() + (bounds.getWidth() - stage.getWidth()) / 2.0;
-            double y = bounds.getMinY() + (bounds.getHeight() - stage.getHeight()) / 2.0;
-            if (Math.abs(stage.getX() - x) > 1.0) {
-                stage.setX(x);
-            }
-            if (Math.abs(stage.getY() - y) > 1.0) {
-                stage.setY(y);
-            }
         }
     }
 
