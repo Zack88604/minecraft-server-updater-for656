@@ -43,6 +43,7 @@ import javafx.scene.shape.Rectangle;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
 import javafx.stage.StageStyle;
+import javafx.stage.Window;
 import javafx.stage.WindowEvent;
 import javafx.util.Duration;
 
@@ -258,6 +259,12 @@ final class JavaFxUpdateView implements UpdateView {
     // Debug close button
     private final Button btnClose = new Button("Close");
 
+    // ERROR-only lightweight action. It lives in the content header (not the
+    // custom window title bar) and is unmanaged outside ERROR, so it reserves
+    // no space in any other phase.
+    private final Button btnErrorHelp = new Button("? Get help");
+    private UpdateUiState errorState;
+
     // Persistent bottom copyright line (always the last row of the root).
     private final Label lblFooter = new Label();
 
@@ -374,6 +381,9 @@ final class JavaFxUpdateView implements UpdateView {
     @Override
     public void render(UpdateUiState state) {
         setPhase(state.getPhase());
+        errorState = state.getPhase() == UpdatePhase.ERROR ? state : null;
+        btnErrorHelp.setVisible(errorState != null);
+        btnErrorHelp.setManaged(errorState != null);
         applyHeader(state);
         applyOverall(state);
         applyDownload(state);
@@ -1302,6 +1312,74 @@ final class JavaFxUpdateView implements UpdateView {
         return alert;
     }
 
+    /**
+     * Build the ERROR troubleshooting dialog. This is deliberately view-only:
+     * it has no listener calls and therefore cannot pause, resume, or close the
+     * updater. The owner is the current main stage; an on-shown correction
+     * centres the transparent window over that owner after CSS has established
+     * the dialog's final size.
+     */
+    Alert createHelpAlert(UpdateUiState state) {
+        Alert alert = new Alert(Alert.AlertType.NONE);
+        alert.setTitle("Troubleshooting");
+        alert.initStyle(WINDOW_STYLE);
+        makeDialogSceneTransparent(alert);
+        alert.setHeaderText(null);
+        Label header = new Label("Troubleshooting");
+        header.getStyleClass().add("dialog-header");
+        alert.getDialogPane().setHeader(header);
+
+        VBox suggestions = new VBox(8);
+        suggestions.getStyleClass().add("help-suggestions");
+        int number = 1;
+        for (String hint : ErrorHintResolver.resolve(state)) {
+            Label item = new Label(number++ + ".  " + hint);
+            item.setWrapText(true);
+            item.setMaxWidth(360);
+            suggestions.getChildren().add(item);
+        }
+        alert.getDialogPane().setContent(suggestions);
+
+        ButtonType close = new ButtonType("Close", ButtonBar.ButtonData.CANCEL_CLOSE);
+        alert.getButtonTypes().setAll(close);
+        alert.initOwner(stage);
+        if (stylesheet != null) {
+            alert.getDialogPane().getStylesheets().add(stylesheet);
+        }
+        alert.getDialogPane().getStyleClass().addAll("root", "help-dialog");
+        ((Button) alert.getDialogPane().lookupButton(close)).getStyleClass().add("primary-button");
+        alert.setOnShown(e -> {
+            Window dialog = alert.getDialogPane().getScene().getWindow();
+            dialog.setX(stage.getX() + (stage.getWidth() - dialog.getWidth()) / 2.0);
+            dialog.setY(stage.getY() + (stage.getHeight() - dialog.getHeight()) / 2.0);
+        });
+        return alert;
+    }
+
+    private void showErrorHelp() {
+        UpdateUiState snapshot = errorState;
+        if (snapshot == null || phase != UpdatePhase.ERROR) {
+            return;
+        }
+        showQuitOverlay();
+        try {
+            createHelpAlert(snapshot).showAndWait();
+        } finally {
+            hideQuitOverlay();
+        }
+    }
+
+    private static void makeDialogSceneTransparent(Alert alert) {
+        if (alert.getDialogPane().getScene() != null) {
+            alert.getDialogPane().getScene().setFill(Color.TRANSPARENT);
+        }
+        alert.getDialogPane().sceneProperty().addListener((obs, oldScene, newScene) -> {
+            if (newScene != null) {
+                newScene.setFill(Color.TRANSPARENT);
+            }
+        });
+    }
+
     // ── Construction ──────────────────────────────────────────────
 
     private void initUI(String gameDir) {
@@ -1357,6 +1435,12 @@ final class JavaFxUpdateView implements UpdateView {
         statusHeader.getStyleClass().add("status-header");
         statusHeader.setAlignment(Pos.CENTER_LEFT);
         HBox.setHgrow(statusText, Priority.ALWAYS);
+        btnErrorHelp.getStyleClass().add("error-help-button");
+        btnErrorHelp.setVisible(false);
+        btnErrorHelp.setManaged(false);
+        btnErrorHelp.setOnAction(e -> showErrorHelp());
+        StackPane statusHeaderLayer = new StackPane(statusHeader, btnErrorHelp);
+        StackPane.setAlignment(btnErrorHelp, Pos.TOP_RIGHT);
 
         // Overall progress area: bar + percent label.
         overallArea.getStyleClass().add("overall-progress");
@@ -1398,7 +1482,7 @@ final class JavaFxUpdateView implements UpdateView {
         // root, so the content layout is unchanged by the frameless window.
         VBox content = new VBox(8);
         content.setPadding(new Insets(18, 22, 18, 22));
-        content.getChildren().addAll(statusHeader, overallArea, dlArea, detailsPane);
+        content.getChildren().addAll(statusHeaderLayer, overallArea, dlArea, detailsPane);
 
         // Debug footer — only present in debug mode, enabled once the flow allows
         // the user to close.

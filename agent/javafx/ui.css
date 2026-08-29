@@ -110,6 +110,27 @@
     -fx-alignment: center-left;
 }
 
+/* ERROR content action: deliberately lighter than a primary dialog action and
+   placed over the status header, so it adds no row or height to the window. */
+.button.error-help-button {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-background-radius: 5px;
+    -fx-border-color: transparent;
+    -fx-padding: 4px 7px;
+    -fx-font-size: 12px;
+    -fx-text-fill: #8F99A3;
+    -fx-focus-color: transparent;
+    -fx-faint-focus-color: transparent;
+}
+.button.error-help-button:hover {
+    -fx-background-color: rgba(255, 255, 255, 0.06);
+    -fx-text-fill: #E6E8EB;
+}
+.button.error-help-button:pressed {
+    -fx-background-color: rgba(255, 255, 255, 0.11);
+}
+
 /* The status-illustration slot (StackPane.status-image holding two ImageViews)
    is fitted to 64x64 in JavaFxUpdateView and hidden (managed=false) while no
    art is shown, so an empty slot contributes no height and never breaks the
@@ -544,6 +565,15 @@
 
 .dialog-pane > .content.label {
     -fx-font-size: 13px;
+}
+
+.help-dialog {
+    -fx-pref-width: 410px;
+}
+
+.help-dialog .help-suggestions .label {
+    -fx-font-size: 13px;
+    -fx-text-fill: #A8B0BA;
 }
 
 .dialog-pane > .button-bar {
