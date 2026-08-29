@@ -12,6 +12,7 @@ import javafx.animation.Interpolator;
 import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
 import javafx.animation.ParallelTransition;
+import javafx.animation.PauseTransition;
 import javafx.animation.ScaleTransition;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
@@ -51,6 +52,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -126,6 +128,12 @@ final class JavaFxUpdateView implements UpdateView {
     private static final double FILE_SHIMMER_SWEEP_MS = 880;
     private static final double FILE_SHIMMER_PAUSE_MS = 620;
 
+    // A slow file is still a healthy download. This view-only timer changes
+    // only the character art after one continuous file has occupied the
+    // DOWNLOADING phase for ten seconds; it is unrelated to stall/timeout
+    // detection and is reset as soon as the current path or phase changes.
+    private static final double DOWNLOAD_WAITING_DELAY_MS = 10_000;
+
     // Quit-update dim overlay (UI修复.md 一): a ~120ms fade in, matching the
     // existing micro-animation budget. While the "Quit update?" confirmation
     // dialog is open the main window is dimmed to OVERLAY_OPACITY so the dialog
@@ -180,6 +188,7 @@ final class JavaFxUpdateView implements UpdateView {
     private static final String IMG_UPDATER = "/images/updater.png";
     private static final String IMG_CHECKING = "/images/checking.png";
     private static final String IMG_DOWNLOADING = "/images/downloading.png";
+    private static final String IMG_DOWNLOADING_WAITING = "/images/downloading_waiting.png";
     private static final String IMG_CLEANING = "/images/cleaning.png";
     private static final String IMG_SUCCESS = "/images/success.png";
     private static final String IMG_ERROR = "/images/error.png";
@@ -283,6 +292,14 @@ final class JavaFxUpdateView implements UpdateView {
     private Animation statusFade;
     private Animation headerFade;
 
+    // One reusable timer, keyed to the active file path. Re-rendering the same
+    // snapshot never restarts it, so frequent progress ticks cannot postpone or
+    // repeatedly toggle the waiting illustration.
+    private final PauseTransition downloadWaitingTimer =
+            new PauseTransition(Duration.millis(DOWNLOAD_WAITING_DELAY_MS));
+    private String downloadWaitingPath;
+    private boolean downloadWaitingArt;
+
     // Quit-update dim overlay (UI修复.md 一): fills the main window's rounded
     // client area and fades in while the "Quit update?" confirmation dialog is
     // open, so the dialog is the clear visual focus. It sits on top of the
@@ -337,6 +354,12 @@ final class JavaFxUpdateView implements UpdateView {
         this.stage = new Stage();
         java.net.URL css = getClass().getResource("/ui.css");
         this.stylesheet = css == null ? null : css.toExternalForm();
+        downloadWaitingTimer.setOnFinished(event -> {
+            if (phase == UpdatePhase.DOWNLOADING && downloadWaitingPath != null) {
+                downloadWaitingArt = true;
+                updateStatusImage(UpdatePhase.DOWNLOADING);
+            }
+        });
         initUI(gameDir);
     }
 
@@ -380,6 +403,7 @@ final class JavaFxUpdateView implements UpdateView {
      */
     @Override
     public void render(UpdateUiState state) {
+        updateDownloadWaitingState(state);
         setPhase(state.getPhase());
         errorState = state.getPhase() == UpdatePhase.ERROR ? state : null;
         btnErrorHelp.setVisible(errorState != null);
@@ -406,6 +430,7 @@ final class JavaFxUpdateView implements UpdateView {
         stopQuitOverlayFade();
         stopProgressAnimations();
         stopShimmer();
+        downloadWaitingTimer.stop();
         stage.close();
     }
 
@@ -873,6 +898,25 @@ final class JavaFxUpdateView implements UpdateView {
 
     // ── Status illustration ────────────────────────────────────────
 
+    /** Keep the ten-second illustration timer bound to one active file. */
+    private void updateDownloadWaitingState(UpdateUiState state) {
+        DownloadProgress download = state.getDownloadProgress();
+        String path = state.getPhase() == UpdatePhase.DOWNLOADING
+                && download.isActive() ? download.getPath() : null;
+        if (path == null || path.isEmpty()) {
+            downloadWaitingTimer.stop();
+            downloadWaitingPath = null;
+            downloadWaitingArt = false;
+            return;
+        }
+        if (!Objects.equals(downloadWaitingPath, path)) {
+            downloadWaitingTimer.stop();
+            downloadWaitingPath = path;
+            downloadWaitingArt = false;
+            downloadWaitingTimer.playFromStart();
+        }
+    }
+
     /** Map a phase to its status-illustration resource, or null for none. */
     private static String statusImageResource(UpdatePhase phase) {
         switch (phase) {
@@ -889,7 +933,9 @@ final class JavaFxUpdateView implements UpdateView {
     /** Point the status illustration at the given phase's art. */
     private void updateStatusImage(UpdatePhase phase) {
         boolean entrance = phase == UpdatePhase.SUCCESS || phase == UpdatePhase.ERROR;
-        showStatusImage(statusImageResource(phase), entrance);
+        String resource = phase == UpdatePhase.DOWNLOADING && downloadWaitingArt
+                ? IMG_DOWNLOADING_WAITING : statusImageResource(phase);
+        showStatusImage(resource, entrance);
     }
 
     /** Show the status illustration for a JAR resource, without an entrance. */
@@ -996,6 +1042,7 @@ final class JavaFxUpdateView implements UpdateView {
     /** All status-art resources, decoded once at view startup. */
     private static final String[] STATUS_ART = {
         IMG_PREPARING, IMG_UPDATER, IMG_CHECKING, IMG_DOWNLOADING,
+        IMG_DOWNLOADING_WAITING,
         IMG_CLEANING, IMG_SUCCESS, IMG_ERROR,
     };
 
