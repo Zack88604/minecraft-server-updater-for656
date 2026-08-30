@@ -54,6 +54,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Random;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -188,7 +189,11 @@ final class JavaFxUpdateView implements UpdateView {
     private static final String IMG_UPDATER = "/images/updater.png";
     private static final String IMG_CHECKING = "/images/checking.png";
     private static final String IMG_DOWNLOADING = "/images/downloading.png";
-    private static final String IMG_DOWNLOADING_WAITING = "/images/downloading_waiting.png";
+    private static final String[] IMG_DOWNLOADING_WAITING = {
+        "/images/downloading_waiting1.png",
+        "/images/downloading_waiting2.png",
+        "/images/downloading_waiting3.png",
+    };
     private static final String IMG_CLEANING = "/images/cleaning.png";
     private static final String IMG_SUCCESS = "/images/success.png";
     private static final String IMG_ERROR = "/images/error.png";
@@ -297,8 +302,10 @@ final class JavaFxUpdateView implements UpdateView {
     // repeatedly toggle the waiting illustration.
     private final PauseTransition downloadWaitingTimer =
             new PauseTransition(Duration.millis(DOWNLOAD_WAITING_DELAY_MS));
+    private final Random downloadWaitingRandom = new Random();
     private String downloadWaitingPath;
-    private boolean downloadWaitingArt;
+    private String downloadWaitingVariant;
+    private int lastDownloadWaitingVariant = -1;
 
     // Quit-update dim overlay (UI修复.md 一): fills the main window's rounded
     // client area and fades in while the "Quit update?" confirmation dialog is
@@ -356,7 +363,9 @@ final class JavaFxUpdateView implements UpdateView {
         this.stylesheet = css == null ? null : css.toExternalForm();
         downloadWaitingTimer.setOnFinished(event -> {
             if (phase == UpdatePhase.DOWNLOADING && downloadWaitingPath != null) {
-                downloadWaitingArt = true;
+                int choice = chooseDownloadWaitingVariant();
+                downloadWaitingVariant = IMG_DOWNLOADING_WAITING[choice];
+                lastDownloadWaitingVariant = choice;
                 updateStatusImage(UpdatePhase.DOWNLOADING);
             }
         });
@@ -906,15 +915,25 @@ final class JavaFxUpdateView implements UpdateView {
         if (path == null || path.isEmpty()) {
             downloadWaitingTimer.stop();
             downloadWaitingPath = null;
-            downloadWaitingArt = false;
+            downloadWaitingVariant = null;
             return;
         }
         if (!Objects.equals(downloadWaitingPath, path)) {
             downloadWaitingTimer.stop();
             downloadWaitingPath = path;
-            downloadWaitingArt = false;
+            downloadWaitingVariant = null;
             downloadWaitingTimer.playFromStart();
         }
+    }
+
+    /** Randomize once per slow file, avoiding the immediately previous variant. */
+    private int chooseDownloadWaitingVariant() {
+        int count = IMG_DOWNLOADING_WAITING.length;
+        if (lastDownloadWaitingVariant < 0 || lastDownloadWaitingVariant >= count || count < 2) {
+            return downloadWaitingRandom.nextInt(count);
+        }
+        int choice = downloadWaitingRandom.nextInt(count - 1);
+        return choice >= lastDownloadWaitingVariant ? choice + 1 : choice;
     }
 
     /** Map a phase to its status-illustration resource, or null for none. */
@@ -933,8 +952,8 @@ final class JavaFxUpdateView implements UpdateView {
     /** Point the status illustration at the given phase's art. */
     private void updateStatusImage(UpdatePhase phase) {
         boolean entrance = phase == UpdatePhase.SUCCESS || phase == UpdatePhase.ERROR;
-        String resource = phase == UpdatePhase.DOWNLOADING && downloadWaitingArt
-                ? IMG_DOWNLOADING_WAITING : statusImageResource(phase);
+        String resource = phase == UpdatePhase.DOWNLOADING && downloadWaitingVariant != null
+                ? downloadWaitingVariant : statusImageResource(phase);
         showStatusImage(resource, entrance);
     }
 
@@ -1042,7 +1061,8 @@ final class JavaFxUpdateView implements UpdateView {
     /** All status-art resources, decoded once at view startup. */
     private static final String[] STATUS_ART = {
         IMG_PREPARING, IMG_UPDATER, IMG_CHECKING, IMG_DOWNLOADING,
-        IMG_DOWNLOADING_WAITING,
+        IMG_DOWNLOADING_WAITING[0], IMG_DOWNLOADING_WAITING[1],
+        IMG_DOWNLOADING_WAITING[2],
         IMG_CLEANING, IMG_SUCCESS, IMG_ERROR,
     };
 
