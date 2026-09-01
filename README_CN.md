@@ -110,7 +110,7 @@ agent\setup-agent.bat C:\path\to\instance http://your-server:25565
 ├── mc-update.properties                 # 持久化 server/debug/adapter 设置
 └── .mc-update/
     ├── gui-selection.properties          # 可选的已记住 GUI 选择
-    ├── gui-server-trust.properties       # 已批准的服务端预设身份
+    ├── gui-server-trust.properties       # 已批准的服务器 URL 与预设身份
     ├── gui-presets/                      # 本地及服务端下载的预设 JAR
     └── gui-runtimes/                     # 已校验的 V2 helper 运行时解压目录
 ```
@@ -122,10 +122,10 @@ agent\setup-agent.bat C:\path\to\instance http://your-server:25565
 | `/api/v2/manifest` | GET | 完整文件清单（路径、SHA-256、大小） |
 | `/api/files/<path>` | GET | 下载指定资源文件 |
 | `/api/agent` | GET | 下载最新 `UpdateAgent_core.jar` |
-| `/api/v2/gui-preset` | GET | 可选的已签名服务端 GUI 预设描述 |
+| `/api/v2/gui-preset` | GET | 可选的服务端 GUI 预设描述 |
 | `/api/v2/gui-presets/<archive>.jar` | GET | 描述文件指定的预设 JAR |
 | `/api/config` | GET | 管理路径与排除路径配置 |
-| `/api/generate` | POST | 重新生成清单（Token 保护） |
+| `/api/generate` | POST | 生成已配置的服务端目标（Token 保护） |
 | `/api/health` | GET | 健康检查 |
 
 ## GUI Adapter 开发
@@ -147,7 +147,7 @@ agent\setup-agent.bat C:\path\to\instance http://your-server:25565
 | 变量 | 默认值 | 描述 |
 |------|--------|------|
 | `PORT` | `25565` | HTTP 端口 |
-| `GENERATE_TOKEN` | *(空)* | 保护 `/api/generate` 接口 |
+| `GENERATE_TOKEN` | *（空）* | 保护 `/api/generate` 接口 |
 | `DEBUG` | `false` | Flask 调试模式 |
 
 ### Agent（JVM 属性）
@@ -168,8 +168,6 @@ agent\setup-agent.bat C:\path\to\instance http://your-server:25565
 | `mc-update.debug` | `false` | 同步完成后保持窗口打开 |
 | `mc-update.gui-adapter` | *（内建 Swing）* | `GuiAdapterFactory` 的完整类名 |
 | `mc-update.server-gui` | `disabled` | 服务端预设策略：`disabled`、`recommended` 或 `required` |
-| `mc-update.server-gui-key-id` | *（空）* | 服务端 GUI 预设要求的签名 key id |
-| `mc-update.server-gui-public-key` | *（空）* | 客户端固定的 Base64 X.509 Ed25519 公钥 |
 
 **推荐方式：`mc-update.properties`**（由安装脚本写入）：
 ```properties
@@ -193,35 +191,53 @@ server=http://cdn1.example.com:25565,http://cdn2.example.com:8443
 
 ### 服务端发布 GUI 预设
 
-服务器可以在普通游戏文件清单之外发布一个已签名的 GUI 预设。客户端会先校验
-描述文件签名和 JAR 的 SHA-256；该能力默认禁用。
+服务器可以在普通游戏文件清单之外发布一个可选 GUI 预设。配置的更新服务器就是
+信任边界：客户端会校验描述文件结构、下载 JAR 的 SHA-256 与大小，并在首次加载每个
+`服务器 URL + 预设 id` 身份前向用户确认。该能力默认禁用。
 
-将 JAR 放到 /srv/mc-update/gui-presets/。只生成一次 Ed25519 密钥，并把私钥保存在
-容器和公开数据卷之外。每次 JAR、版本、文件名或 key id 变化后，重新生成
-/srv/mc-update/gui-preset.json：
+服务端管理员手动把 JAR 放到挂载的数据卷中，例如：
 
-    openssl genpkey -algorithm Ed25519 -out /secure/gui-preset-key.pem
-    python3 -m pip install -r server/requirements.txt
-    python3 server/sign_gui_preset.py \
-      --preset /srv/mc-update/gui-presets/example-javafx.jar \
-      --id example-javafx --version 1.0.0 --key-id official-2026 \
-      --private-key /secure/gui-preset-key.pem \
-      --out /srv/mc-update/gui-preset.json \
-      --public-key-out /secure/gui-preset-public-key.b64
+    /srv/mc-update/gui-presets/example-javafx-1.2.0.jar
 
-将输出的 Base64 公钥写入每个客户端的 mc-update.properties：
+然后在 `/srv/mc-update/update-config.json` 中配置发布目标：
+
+```json
+{
+  "managed_paths": ["mods/", "config/", "resourcepacks/"],
+  "excluded_paths": ["config/secret.cfg"],
+  "generation": {
+    "targets": ["manifest", "gui-preset"],
+    "gui_preset": {
+      "id": "example-javafx",
+      "version": "1.2.0",
+      "file": "example-javafx-1.2.0.jar"
+    }
+  }
+}
+```
+
+如果服务端配置了 `GENERATE_TOKEN`，触发发布时传入它；不需要进入容器执行签名，也不会通过
+HTTP 上传代码：
+
+    curl -X POST https://update.example.com/api/generate \
+      -H "X-Generate-Token: $GENERATE_TOKEN"
+
+`/api/generate` 只读取这份服务端配置。它会校验手动安装的 JAR，计算哈希与大小，并且
+仅在校验成功后原子替换 `/srv/mc-update/gui-preset.json`。没有 `generation` 节点时，
+会保持兼容，默认只生成 `["manifest"]`。面向客户端的 `/api/config` 只返回
+`managed_paths` 和 `excluded_paths`，不会暴露 `generation`。
+
+在客户端启用可选策略：
 
     server-gui=recommended
-    server-gui-key-id=official-2026
-    server-gui-public-key=<Base64 X.509 Ed25519 public key>
 
-recommended 只会在没有优先级更高的本地已记住选择时使用服务器预设，并会刷新
-已选中的服务器预设。required 会覆盖本地已记住选择，但仍需要用户首次批准同一
-预设身份。disabled 为默认值；显式配置的 gui-adapter 始终优先。
+`recommended` 只会在没有优先级更高的本地已记住选择时使用服务器预设，并会刷新已选中的
+服务器预设。`required` 会覆盖本地已记住选择，但仍需要用户首次批准同一服务器和预设
+身份。`disabled` 为默认值；显式配置的 `gui-adapter` 始终优先。
 
-首次使用某个 id + key-id + 公钥指纹时，内建 Swing 会显示外部代码风险提示并要求
-确认。之后同一身份的已签名新版本不会重复提示；更换 id 或签名密钥会要求重新确认。
-Ed25519 校验需要 Java 15 或更新版本；旧 JVM 会回退到 Swing。生产环境应使用 HTTPS。
+首次使用某个服务器 URL + 预设 id 时，内建 Swing 会显示外部代码风险提示。之后同一
+身份的新版本不会重复提示；更换服务器 URL 或预设 id 会重新确认。生产环境应使用 HTTPS。
+配置后，生成 Token 只保护发布操作，不保护客户端下载，且绝不能写入客户端配置。升级后，旧的基于签名密钥的批准记录会要求重新确认一次。
 
 ### 选择性同步 (`update-config.json`)
 
@@ -255,7 +271,6 @@ Ed25519 校验需要 Java 15 或更新版本；旧 JVM 会回退到 Swing。生�
 │   ├── app.py                            # Flask API
 │   ├── entrypoint.sh                     # 容器入口
 │   ├── generate_manifest.py              # 清单生成器
-│   ├── sign_gui_preset.py                 # 服务端预设描述签名工具
 │   └── requirements.txt
 └── agent/
     ├── META-INF/MANIFEST.MF              # java-agent 启动器清单

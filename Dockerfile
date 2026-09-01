@@ -10,7 +10,7 @@
 FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/gcr.io/iguazio/alpine:3.20
 
 # Install Python 3 and Flask (via apk to avoid PEP 668 restrictions)
-RUN apk add --no-cache python3 py3-flask py3-cryptography
+RUN apk add --no-cache python3 py3-flask
 
 # Copy server code
 COPY server/ /app/
