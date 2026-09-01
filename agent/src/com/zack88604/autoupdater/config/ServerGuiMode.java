@@ -1,17 +1,17 @@
 package com.zack88604.autoupdater.config;
 
 /**
- * Local policy for a signed GUI preset offered by the configured update server.
+ * Local policy for a GUI preset offered by the configured update server.
  *
  * <p>Remote GUI loading is disabled unless the user enables one of the
- * server-backed modes and configures a trusted signing key.</p>
+ * server-backed modes.</p>
  */
 public enum ServerGuiMode {
     /** Ignore any server GUI-preset offer. */
     DISABLED,
-    /** Use a verified server preset only when no local default takes precedence. */
+    /** Use a server preset only when no local default takes precedence. */
     RECOMMENDED,
-    /** Prefer a verified server preset over a remembered local GUI choice. */
+    /** Prefer a server preset over a remembered local GUI choice. */
     REQUIRED;
 
     /** Parse the persisted setting, falling back to the safe disabled mode. */

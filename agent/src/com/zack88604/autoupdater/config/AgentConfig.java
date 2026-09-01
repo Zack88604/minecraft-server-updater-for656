@@ -23,8 +23,6 @@ public final class AgentConfig {
     public static final String PROP_DEBUG = "mc-update.debug";
     public static final String PROP_GUI_ADAPTER = "mc-update.gui-adapter";
     public static final String PROP_SERVER_GUI_MODE = "mc-update.server-gui";
-    public static final String PROP_SERVER_GUI_KEY_ID = "mc-update.server-gui-key-id";
-    public static final String PROP_SERVER_GUI_PUBLIC_KEY = "mc-update.server-gui-public-key";
 
     private static final String CONFIG_FILE = "mc-update.properties";
     public static final String DEFAULT_SERVER = "http://localhost:25565";
@@ -35,20 +33,15 @@ public final class AgentConfig {
     private final boolean admin;
     private final String guiAdapterFactoryClassName;
     private final ServerGuiMode serverGuiMode;
-    private final String serverGuiKeyId;
-    private final String serverGuiPublicKey;
 
     private AgentConfig(String gameDir, String server, boolean debug, boolean admin,
-                        String guiAdapterFactoryClassName, ServerGuiMode serverGuiMode,
-                        String serverGuiKeyId, String serverGuiPublicKey) {
+                        String guiAdapterFactoryClassName, ServerGuiMode serverGuiMode) {
         this.gameDir = gameDir;
         this.server = server;
         this.debug = debug;
         this.admin = admin;
         this.guiAdapterFactoryClassName = guiAdapterFactoryClassName;
         this.serverGuiMode = serverGuiMode;
-        this.serverGuiKeyId = serverGuiKeyId;
-        this.serverGuiPublicKey = serverGuiPublicKey;
     }
 
     /** Resolve configuration from the current JVM and the agent argument string. */
@@ -84,8 +77,6 @@ public final class AgentConfig {
         String debugValue;
         String guiAdapterFactory;
         String serverGuiModeValue;
-        String serverGuiKeyId;
-        String serverGuiPublicKey;
         if (admin) {
             server = coalesce(
                     arguments.get("server"),
@@ -109,16 +100,6 @@ public final class AgentConfig {
                     system.getProperty(PROP_SERVER_GUI_MODE),
                     fileConfig.getProperty("server-gui"),
                     ServerGuiMode.DISABLED.name()
-            );
-            serverGuiKeyId = coalesce(
-                    arguments.get("server-gui-key-id"),
-                    system.getProperty(PROP_SERVER_GUI_KEY_ID),
-                    fileConfig.getProperty("server-gui-key-id")
-            );
-            serverGuiPublicKey = coalesce(
-                    arguments.get("server-gui-public-key"),
-                    system.getProperty(PROP_SERVER_GUI_PUBLIC_KEY),
-                    fileConfig.getProperty("server-gui-public-key")
             );
         } else {
             server = coalesce(
@@ -144,21 +125,10 @@ public final class AgentConfig {
                     system.getProperty(PROP_SERVER_GUI_MODE),
                     ServerGuiMode.DISABLED.name()
             );
-            serverGuiKeyId = coalesce(
-                    fileConfig.getProperty("server-gui-key-id"),
-                    arguments.get("server-gui-key-id"),
-                    system.getProperty(PROP_SERVER_GUI_KEY_ID)
-            );
-            serverGuiPublicKey = coalesce(
-                    fileConfig.getProperty("server-gui-public-key"),
-                    arguments.get("server-gui-public-key"),
-                    system.getProperty(PROP_SERVER_GUI_PUBLIC_KEY)
-            );
         }
 
         return new AgentConfig(gameDir, server, isTrue(debugValue), admin,
-                guiAdapterFactory, ServerGuiMode.parse(serverGuiModeValue),
-                serverGuiKeyId, serverGuiPublicKey);
+                guiAdapterFactory, ServerGuiMode.parse(serverGuiModeValue));
     }
 
     public String getGameDir() {
@@ -185,19 +155,9 @@ public final class AgentConfig {
         return guiAdapterFactoryClassName;
     }
 
-    /** Return the local policy for a signed GUI preset offered by the server. */
+    /** Return the local policy for a GUI preset offered by the update server. */
     public ServerGuiMode getServerGuiMode() {
         return serverGuiMode;
-    }
-
-    /** Return the expected server signing-key identifier, or {@code null}. */
-    public String getServerGuiKeyId() {
-        return serverGuiKeyId;
-    }
-
-    /** Return the Base64-encoded X.509 Ed25519 public key trusted by this client. */
-    public String getServerGuiPublicKey() {
-        return serverGuiPublicKey;
     }
 
     public boolean isAdmin() {

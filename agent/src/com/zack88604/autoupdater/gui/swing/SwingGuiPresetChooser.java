@@ -46,7 +46,7 @@ public final class SwingGuiPresetChooser {
 
 
     /**
-     * Ask for explicit trust before a verified server-published preset runs.
+     * Ask for explicit trust before a server-published preset runs.
      * The result is persisted by the bootstrap for this exact preset identity.
      */
     public static boolean confirmServerPreset(final ServerGuiPresetOffer offer,
@@ -111,14 +111,14 @@ public final class SwingGuiPresetChooser {
 
     private static boolean showServerRiskDialog(ServerGuiPresetOffer offer,
                                                  String serverUrl) {
-        String message = "The update server offers a signed external GUI preset:\\n\\n"
+        String message = "The update server offers an external GUI preset:\\n\\n"
                 + offer.getId() + " (" + offer.getVersion() + ")\\n"
                 + "Server: " + serverUrl + "\\n\\n"
-                + "The archive hash and signature were verified against the public key "
-                + "configured on this client. Loading it still executes external Java code, "
-                + "which may read or modify files, access the network, or affect the game "
-                + "process. Only trust a server and publisher you recognize.\\n\\n"
-                + "Trust this preset identity and load it?";
+                + "The downloaded archive matches the descriptor supplied by this update "
+                + "server. Loading it still executes external Java code, which may read or "
+                + "modify files, access the network, or affect the game process. Only trust "
+                + "a server you recognize.\\n\\n"
+                + "Trust this server preset identity and load it?";
         Object[] options = {"Trust and load server GUI", "Use built-in Swing"};
         return JOptionPane.showOptionDialog(null, message, "Server GUI security warning",
                 JOptionPane.DEFAULT_OPTION, JOptionPane.WARNING_MESSAGE, null, options,

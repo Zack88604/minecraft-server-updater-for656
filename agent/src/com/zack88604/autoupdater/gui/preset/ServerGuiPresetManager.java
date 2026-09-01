@@ -12,11 +12,12 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Retrieves, verifies, and installs a signed server GUI preset before UI creation.
+ * Retrieves and installs a server GUI preset before UI creation.
  *
- * <p>Only descriptor metadata and JAR bytes are handled here. Loading classes
- * remains the bootstrap's responsibility after the user has approved the
- * preset identity.</p>
+ * <p>The configured update server is trusted to publish the descriptor and
+ * archive. The descriptor hash and size still detect interrupted or mismatched
+ * downloads; loading classes remains the bootstrap's responsibility after the
+ * user has approved the server and preset identity.</p>
  */
 public final class ServerGuiPresetManager {
 
@@ -33,20 +34,10 @@ public final class ServerGuiPresetManager {
     }
 
     /**
-     * Return a verified, locally installed offer or {@code null} when the
-     * optional server offer is unavailable, invalid, or cannot be installed.
+     * Return an installed offer or {@code null} when the optional server offer
+     * is unavailable, invalid, or cannot be installed.
      */
-    public InstalledPreset install(List<String> serverUrls, String keyId,
-                                   String encodedPublicKey, GuiPresetStore store) {
-        if (keyId == null || encodedPublicKey == null) {
-            return null;
-        }
-        String fingerprint =
-                ServerGuiPresetSignatureVerifier.fingerprint(encodedPublicKey);
-        if (fingerprint == null) {
-            return null;
-        }
-
+    public InstalledPreset install(List<String> serverUrls, GuiPresetStore store) {
         if (serverUrls == null) {
             return null;
         }
@@ -63,11 +54,8 @@ public final class ServerGuiPresetManager {
             } catch (IllegalArgumentException error) {
                 continue;
             }
-            if (!ServerGuiPresetSignatureVerifier.verify(offer, keyId, encodedPublicKey)) {
-                continue;
-            }
 
-            InstalledPreset installed = installFromResponse(response, offer, fingerprint, store);
+            InstalledPreset installed = installFromResponse(response, offer, store);
             if (installed != null) {
                 return installed;
             }
@@ -77,7 +65,7 @@ public final class ServerGuiPresetManager {
 
     private InstalledPreset installFromResponse(ServerGuiPresetTransport.Response response,
                                                 ServerGuiPresetOffer offer,
-                                                String fingerprint, GuiPresetStore store) {
+                                                GuiPresetStore store) {
         File temporary = null;
         try {
             File destination = store.getServerPresetArchive(offer.getId());
@@ -96,7 +84,7 @@ public final class ServerGuiPresetManager {
             if (preset == null) {
                 return null;
             }
-            return new InstalledPreset(offer, preset, fingerprint, response.getServerUrl());
+            return new InstalledPreset(offer, preset, response.getServerUrl());
         } catch (IOException error) {
             return null;
         } finally {
@@ -146,18 +134,16 @@ public final class ServerGuiPresetManager {
         }
     }
 
-    /** A verified archive plus the server identity that supplied it. */
+    /** An installed archive plus the server identity that supplied it. */
     public static final class InstalledPreset {
         private final ServerGuiPresetOffer offer;
         private final GuiPreset preset;
-        private final String keyFingerprint;
         private final String serverUrl;
 
         private InstalledPreset(ServerGuiPresetOffer offer, GuiPreset preset,
-                                String keyFingerprint, String serverUrl) {
+                                String serverUrl) {
             this.offer = offer;
             this.preset = preset;
-            this.keyFingerprint = keyFingerprint;
             this.serverUrl = serverUrl;
         }
 
@@ -169,17 +155,12 @@ public final class ServerGuiPresetManager {
             return preset;
         }
 
-        public String getKeyFingerprint() {
-            return keyFingerprint;
-        }
-
         public String getServerUrl() {
             return serverUrl;
         }
 
         public ServerGuiPresetTrust toTrustRecord() {
-            return new ServerGuiPresetTrust(offer.getId(), offer.getKeyId(),
-                    keyFingerprint, offer.getArchiveName());
+            return new ServerGuiPresetTrust(serverUrl, offer.getId(), offer.getArchiveName());
         }
     }
 }

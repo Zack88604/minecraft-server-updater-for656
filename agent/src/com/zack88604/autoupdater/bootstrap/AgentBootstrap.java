@@ -18,7 +18,6 @@ import com.zack88604.autoupdater.gui.preset.GuiPresetSelection;
 import com.zack88604.autoupdater.gui.preset.GuiPresetStore;
 import com.zack88604.autoupdater.gui.preset.JavaHelperGuiAdapter;
 import com.zack88604.autoupdater.gui.preset.ServerGuiPresetManager;
-import com.zack88604.autoupdater.gui.preset.ServerGuiPresetSignatureVerifier;
 import com.zack88604.autoupdater.gui.preset.ServerGuiPresetTrust;
 import com.zack88604.autoupdater.gui.swing.SwingGuiAdapterFactory;
 import com.zack88604.autoupdater.gui.swing.SwingGuiPresetChooser;
@@ -137,9 +136,9 @@ public final class AgentBootstrap {
      * Resolve an optional server preset before any external GUI classes load.
      *
      * <p>A remembered local Swing or local-preset selection wins in recommended
-     * mode. A remembered server preset is refreshed from its signed descriptor
-     * when available, and can continue from its verified local cache while the
-     * same configured signing key remains trusted.</p>
+     * mode. A remembered server preset is refreshed when its originating server
+     * remains configured, and can continue from its locally verified cache when
+     * that server is temporarily unavailable.</p>
      */
     private static GuiPresetSelection resolveServerPresetSelection(AgentConfig config,
                                                                     GuiPresetStore presetStore,
@@ -150,15 +149,16 @@ public final class AgentBootstrap {
             return selection;
         }
 
+        List<String> servers = parseServerList(config.getServer());
         ServerGuiPresetTrust trust = presetStore.readServerTrust();
         boolean selectedServerPreset = presetStore.isServerPresetSelection(selection, trust);
-        String configuredFingerprint = ServerGuiPresetSignatureVerifier.fingerprint(
-                config.getServerGuiPublicKey());
-
-        if (selectedServerPreset && (configuredFingerprint == null
-                || !configuredFingerprint.equals(trust.getKeyFingerprint()))) {
-            // Never continue to run a cached server archive after its pinned key changes.
+        if (selectedServerPreset && trust != null && !servers.contains(trust.getServerUrl())) {
+            // A cached server archive is never carried over to a different configured server.
             return GuiPresetSelection.swing(false);
+        }
+        if (selectedServerPreset && trust == null) {
+            // Migrate old key-bound records by requiring a fresh server approval.
+            selection = null;
         }
         if (mode == ServerGuiMode.RECOMMENDED && selection != null
                 && !selectedServerPreset) {
@@ -166,15 +166,14 @@ public final class AgentBootstrap {
         }
 
         ServerGuiPresetManager.InstalledPreset installed = new ServerGuiPresetManager().install(
-                parseServerList(config.getServer()), config.getServerGuiKeyId(),
-                config.getServerGuiPublicKey(), presetStore);
+                servers, presetStore);
         if (installed == null) {
-            return mode == ServerGuiMode.REQUIRED
+            return mode == ServerGuiMode.REQUIRED || selectedServerPreset
                     ? GuiPresetSelection.swing(false) : selection;
         }
 
         boolean trusted = trust != null
-                && trust.matches(installed.getOffer(), installed.getKeyFingerprint());
+                && trust.matches(installed.getOffer(), installed.getServerUrl());
         if (!trusted) {
             if (!SwingGuiPresetChooser.confirmServerPreset(installed.getOffer(),
                     installed.getServerUrl())) {

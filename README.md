@@ -146,7 +146,7 @@ Runtime files owned by the updater:
 ├── mc-update.properties                 # persistent server/debug/adapter settings
 └── .mc-update/
     ├── gui-selection.properties          # optional remembered GUI choice
-    ├── gui-server-trust.properties       # approved signed server preset identity
+    ├── gui-server-trust.properties       # approved server URL + preset identity
     ├── gui-presets/                      # local and server-downloaded preset JARs
     └── gui-runtimes/                     # verified V2 helper runtime extraction
 ```
@@ -169,10 +169,10 @@ launched from that installation), not in the game directory:
 | `/api/v2/manifest` | GET | Full file manifest (paths, SHA-256, sizes) |
 | `/api/files/<path>` | GET | Download a resource file |
 | `/api/agent` | GET | Download the latest `UpdateAgent_core.jar` |
-| `/api/v2/gui-preset` | GET | Optional signed server GUI-preset descriptor |
-| `/api/v2/gui-presets/<archive>.jar` | GET | Archive named by a signed GUI-preset descriptor |
+| `/api/v2/gui-preset` | GET | Optional server GUI-preset descriptor |
+| `/api/v2/gui-presets/<archive>.jar` | GET | Archive named by a GUI-preset descriptor |
 | `/api/config` | GET | Managed paths & excluded paths configuration |
-| `/api/generate` | POST | Regenerate manifest (token-protected) |
+| `/api/generate` | POST | Generate configured server targets (token-protected) |
 | `/api/health` | GET | Health check |
 
 ## GUI Adapter Development
@@ -224,8 +224,6 @@ Configuration is resolved in this order (normal mode):
 | `mc-update.debug` | `false` | Keep GUI open after sync |
 | `mc-update.gui-adapter` | *(built-in JavaFX, Swing fallback)* | Fully qualified `GuiAdapterFactory` class |
 | `mc-update.server-gui` | `disabled` | `disabled`, `recommended`, or `required` server-preset policy |
-| `mc-update.server-gui-key-id` | *(empty)* | Required signing key id for a server GUI preset |
-| `mc-update.server-gui-public-key` | *(empty)* | Base64 X.509 Ed25519 public key pinned by this client |
 
 The built-in JavaFX GUI needs JDK 17+ and downloads its JavaFX 21 runtime from
 Maven Central on first use (see *Embedded JavaFX GUI*). The download runs as a
@@ -257,40 +255,61 @@ server=http://cdn1.example.com:25565,http://cdn2.example.com:8443
 
 ### Server-published GUI presets
 
-A server can publish one signed GUI preset outside the normal game-file manifest.
-The client verifies the descriptor signature and JAR SHA-256 before it can
-consider the archive. Remote GUI loading is disabled by default.
+A server can publish one optional GUI preset outside the normal game-file
+manifest. The configured update server is the trust boundary: the client checks
+the descriptor shape plus the downloaded JAR's SHA-256 and size, then asks the
+user before first loading each `server URL + preset id` identity. Remote GUI
+loading is disabled by default.
 
-Place the JAR in /srv/mc-update/gui-presets/. Generate an Ed25519 key once,
-keep its private half outside the server container, and create
-/srv/mc-update/gui-preset.json after every JAR, version, file-name, or key-id
-change:
+The server administrator installs the JAR manually under the mounted data
+volume, for example:
 
-    openssl genpkey -algorithm Ed25519 -out /secure/gui-preset-key.pem
-    python3 -m pip install -r server/requirements.txt
-    python3 server/sign_gui_preset.py \
-      --preset /srv/mc-update/gui-presets/example-javafx.jar \
-      --id example-javafx --version 1.0.0 --key-id official-2026 \
-      --private-key /secure/gui-preset-key.pem \
-      --out /srv/mc-update/gui-preset.json \
-      --public-key-out /secure/gui-preset-public-key.b64
+    /srv/mc-update/gui-presets/example-javafx-1.2.0.jar
 
-Copy the resulting Base64 public key into each client configuration:
+Then configure the publication target in `/srv/mc-update/update-config.json`:
+
+```json
+{
+  "managed_paths": ["mods/", "config/", "resourcepacks/"],
+  "excluded_paths": ["config/secret.cfg"],
+  "generation": {
+    "targets": ["manifest", "gui-preset"],
+    "gui_preset": {
+      "id": "example-javafx",
+      "version": "1.2.0",
+      "file": "example-javafx-1.2.0.jar"
+    }
+  }
+}
+```
+
+When `GENERATE_TOKEN` is configured, pass it when triggering publication
+without entering the container or uploading code through HTTP:
+
+    curl -X POST https://update.example.com/api/generate \
+      -H "X-Generate-Token: $GENERATE_TOKEN"
+
+`/api/generate` reads only this server-side configuration. It validates the
+manually installed JAR, computes its hash and size, and atomically replaces
+`/srv/mc-update/gui-preset.json` only after validation succeeds. With no
+`generation` block, the backward-compatible default target is `["manifest"]`.
+The client-facing `/api/config` exposes only `managed_paths` and
+`excluded_paths`, never `generation`.
+
+Enable the optional policy on clients:
 
     server-gui=recommended
-    server-gui-key-id=official-2026
-    server-gui-public-key=<Base64 X.509 Ed25519 public key>
 
-recommended uses the verified server preset only when no remembered local choice
-wins, while refreshing a selected server preset. required overrides a remembered
-local choice only after the same preset identity has been approved. disabled is
-the default. An explicit gui-adapter class always takes precedence.
+`recommended` uses the server preset only when no remembered local choice wins,
+while refreshing a selected server preset. `required` overrides a remembered
+local choice only after the same server and preset identity has been approved.
+`disabled` is the default. An explicit `gui-adapter` class always takes
+precedence.
 
-On first use of an id + key-id + public-key fingerprint, the built-in Swing
-dialog explains the external-code risk and asks for approval. Later signed
-versions of that same identity load without another prompt. A changed signing
-key or id requires a new approval. Java 15 or newer is required for Ed25519
-verification; older JVMs fall back to Swing. Use HTTPS in production.
+The first use of a server URL + preset id shows an external-code risk warning.
+A later version of that identity does not prompt again; changing the server URL
+or preset id does. Use HTTPS in production. When configured, the generation Token protects publishing, not client
+downloads, and must never be placed in client configuration. Existing key-based approval records require one fresh confirmation after this upgrade.
 
 ### Selective Sync (`update-config.json`)
 
@@ -324,7 +343,6 @@ cleaned up. Defaults: `managed_paths: ["*"]`, `excluded_paths: []`.
 │   ├── app.py                            # Flask API
 │   ├── entrypoint.sh                     # container entrypoint
 │   ├── generate_manifest.py              # manifest generator
-│   ├── sign_gui_preset.py                 # signs a server GUI-preset descriptor
 │   └── requirements.txt
 └── agent/
     ├── META-INF/MANIFEST.MF              # java-agent launcher manifest

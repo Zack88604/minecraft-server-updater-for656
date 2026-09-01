@@ -2,17 +2,16 @@ package com.zack88604.autoupdater.gui.preset;
 
 import com.zack88604.autoupdater.infrastructure.json.JsonParser;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
- * Signed metadata for one GUI preset published by an update server.
+ * Metadata for one GUI preset published by a configured update server.
  *
- * <p>The signature covers {@link #canonicalPayload()}, including the JAR hash
- * and download path. This value object never loads the archive.</p>
+ * <p>The descriptor supplies transfer integrity metadata only. The operator's
+ * update server is the trust boundary; this value object never loads the
+ * archive.</p>
  */
 public final class ServerGuiPresetOffer {
 
@@ -28,19 +27,14 @@ public final class ServerGuiPresetOffer {
     private final String downloadPath;
     private final String sha256;
     private final long size;
-    private final String keyId;
-    private final String signature;
 
     private ServerGuiPresetOffer(String id, String version, String downloadPath,
-                                 String sha256, long size, String keyId,
-                                 String signature) {
+                                 String sha256, long size) {
         this.id = id;
         this.version = version;
         this.downloadPath = downloadPath;
         this.sha256 = sha256.toLowerCase(Locale.ROOT);
         this.size = size;
-        this.keyId = keyId;
-        this.signature = signature;
     }
 
     /** Parse and validate one server descriptor JSON document. */
@@ -50,11 +44,9 @@ public final class ServerGuiPresetOffer {
         String version = required(JsonParser.getString(json, "version"), "version");
         String path = required(JsonParser.getString(json, "path"), "path");
         String hash = required(JsonParser.getString(json, "sha256"), "sha256");
-        String keyId = required(JsonParser.getString(json, "key_id"), "key_id");
-        String signature = required(JsonParser.getString(json, "signature"), "signature");
         long size = JsonParser.getLong(json, "size", -1);
 
-        if (!SAFE_ID.matcher(id).matches() || !SAFE_ID.matcher(keyId).matches()) {
+        if (!SAFE_ID.matcher(id).matches()) {
             throw new IllegalArgumentException("Invalid server GUI preset identifier");
         }
         if (version.length() > 128 || containsControlCharacter(version)) {
@@ -66,12 +58,7 @@ public final class ServerGuiPresetOffer {
         if (!SHA256.matcher(hash).matches() || size < 0) {
             throw new IllegalArgumentException("Invalid server GUI preset hash or size");
         }
-        try {
-            Base64.getDecoder().decode(signature);
-        } catch (IllegalArgumentException error) {
-            throw new IllegalArgumentException("Invalid server GUI preset signature", error);
-        }
-        return new ServerGuiPresetOffer(id, version, path, hash, size, keyId, signature);
+        return new ServerGuiPresetOffer(id, version, path, hash, size);
     }
 
     /** Return the stable server-side preset identifier. */
@@ -84,7 +71,7 @@ public final class ServerGuiPresetOffer {
         return version;
     }
 
-    /** Return the signed relative HTTP download path. */
+    /** Return the relative HTTP download path. */
     public String getDownloadPath() {
         return downloadPath;
     }
@@ -99,26 +86,9 @@ public final class ServerGuiPresetOffer {
         return size;
     }
 
-    /** Return the configured signing-key identifier. */
-    public String getKeyId() {
-        return keyId;
-    }
-
-    /** Return the Base64-encoded Ed25519 signature. */
-    public String getSignature() {
-        return signature;
-    }
-
     /** Return the reserved local archive name used for this server preset. */
     public String getArchiveName() {
         return "server-" + id + ".jar";
-    }
-
-    /** Return the bytes that must be signed and verified without alteration. */
-    public byte[] canonicalPayload() {
-        String payload = id + "\n" + version + "\n" + downloadPath + "\n"
-                + sha256 + "\n" + size + "\n" + keyId;
-        return payload.getBytes(StandardCharsets.UTF_8);
     }
 
     private static String required(String value, String name) {

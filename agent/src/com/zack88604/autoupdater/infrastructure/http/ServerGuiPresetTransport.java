@@ -11,7 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
- * Small bootstrap-time HTTP transport for a signed server GUI-preset offer.
+ * Small bootstrap-time HTTP transport for a server GUI-preset offer.
  *
  * <p>It is deliberately independent of the update progress transport: GUI
  * selection happens before the normal update controller and its view exist.</p>
@@ -41,7 +41,7 @@ public final class ServerGuiPresetTransport {
         return null;
     }
 
-    /** Download from the same mirror that supplied the signed descriptor. */
+    /** Download from the same mirror that supplied the descriptor. */
     public boolean download(Response response, String relativePath, File destination,
                             long expectedSize) {
         if (response == null || relativePath == null || destination == null) {

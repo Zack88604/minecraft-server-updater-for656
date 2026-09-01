@@ -41,9 +41,8 @@ public final class GuiPresetStore {
     private static final String KEY_FACTORY = "factory-class";
     private static final String MODE_SWING = "swing";
     private static final String MODE_PRESET = "preset";
+    private static final String KEY_SERVER_URL = "server-url";
     private static final String KEY_SERVER_PRESET_ID = "preset-id";
-    private static final String KEY_SERVER_KEY_ID = "key-id";
-    private static final String KEY_SERVER_KEY_FINGERPRINT = "key-fingerprint";
     private static final String KEY_SERVER_ARCHIVE = "archive-name";
     private static final long MAX_METADATA_SIZE = 16 * 1024;
 
@@ -182,7 +181,7 @@ public final class GuiPresetStore {
         Files.deleteIfExists(selectionFile.toPath());
     }
 
-    /** Read the local approval record for a signed server preset, if any. */
+    /** Read the local approval record for a server preset, if any. */
     public ServerGuiPresetTrust readServerTrust() throws IOException {
         if (!serverTrustFile.isFile()) {
             return null;
@@ -191,34 +190,36 @@ public final class GuiPresetStore {
         try (InputStream input = new FileInputStream(serverTrustFile)) {
             values.load(input);
         }
+        String serverUrl = trim(values.getProperty(KEY_SERVER_URL));
         String presetId = trim(values.getProperty(KEY_SERVER_PRESET_ID));
-        String keyId = trim(values.getProperty(KEY_SERVER_KEY_ID));
-        String fingerprint = trim(values.getProperty(KEY_SERVER_KEY_FINGERPRINT));
         String archiveName = trim(values.getProperty(KEY_SERVER_ARCHIVE));
-        if (presetId == null || keyId == null || fingerprint == null
-                || archiveName == null || archiveName.indexOf('/') >= 0
-                || archiveName.indexOf('\\') >= 0 || !archiveName.endsWith(".jar")) {
+        if (serverUrl == null || presetId == null || archiveName == null
+                || archiveName.indexOf('/') >= 0 || archiveName.indexOf('\\') >= 0
+                || !archiveName.endsWith(".jar")) {
             return null;
         }
-        return new ServerGuiPresetTrust(presetId, keyId, fingerprint, archiveName);
+        return new ServerGuiPresetTrust(serverUrl, presetId, archiveName);
     }
 
-    /** Persist one explicit user approval for a signed server preset identity. */
+    /** Persist one explicit user approval for a server preset identity. */
     public void saveServerTrust(ServerGuiPresetTrust trust) throws IOException {
         ensureDirectories();
         Properties values = new Properties();
+        values.setProperty(KEY_SERVER_URL, trust.getServerUrl());
         values.setProperty(KEY_SERVER_PRESET_ID, trust.getPresetId());
-        values.setProperty(KEY_SERVER_KEY_ID, trust.getKeyId());
-        values.setProperty(KEY_SERVER_KEY_FINGERPRINT, trust.getKeyFingerprint());
         values.setProperty(KEY_SERVER_ARCHIVE, trust.getArchiveName());
         writeProperties(serverTrustFile, values, "Minecraft updater server GUI trust");
     }
 
-    /** Return whether a remembered selection is the locally trusted server archive. */
+    /** Return whether a remembered selection uses a reserved server-managed archive. */
     public boolean isServerPresetSelection(GuiPresetSelection selection,
                                            ServerGuiPresetTrust trust) {
-        return selection != null && !selection.isSwing() && trust != null
-                && trust.getArchiveName().equals(selection.getPreset().getArchiveName());
+        if (selection == null || selection.isSwing()) {
+            return false;
+        }
+        String archiveName = selection.getPreset().getArchiveName();
+        return (trust != null && trust.getArchiveName().equals(archiveName))
+                || (archiveName.startsWith("server-") && archiveName.endsWith(".jar"));
     }
 
     /** Return the reserved direct-child archive location for a validated server preset id. */
