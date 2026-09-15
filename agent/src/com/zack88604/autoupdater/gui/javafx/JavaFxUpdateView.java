@@ -511,7 +511,10 @@ final class JavaFxUpdateView implements UpdateView {
             case ERROR: {
                 String em = state.getErrorMessage();
                 UpdateSummary s = state.getSummary();
-                lblStatus.setText("Update failed");
+                lblStatus.setText(em != null
+                        && em.startsWith("Unable to skip the update safely")
+                        ? "Couldn’t skip update safely"
+                        : "Update failed");
                 if (em != null && !em.isEmpty()) {
                     lblDescription.setText(em);
                 } else if (s != null && s.getFailedFiles() > 0) {
@@ -1272,7 +1275,9 @@ final class JavaFxUpdateView implements UpdateView {
         hideQuitOverlay();
         if (choice.isPresent() && choice.get() == quitSkipType) {
             listener.userRequestedClose();
-            stage.close();
+            // Keep the view alive until the controller finishes rollback and
+            // cached-manifest verification. It will close us on success or
+            // render ERROR here on failure, matching the Swing lifecycle.
         } else {
             // "Keep updating", or the dialog was dismissed — resume the update.
             listener.cancelCloseConfirmation();
@@ -1360,7 +1365,9 @@ final class JavaFxUpdateView implements UpdateView {
         Label header = new Label("Quit update?");
         header.getStyleClass().add("dialog-header");
         alert.getDialogPane().setHeader(header);
-        alert.setContentText("The update is still in progress. Skipping it may leave Minecraft out of date.");
+        alert.setContentText("Skipping will restore files changed during this update and verify "
+                + "the last trusted version. Keep this window open; Minecraft will start only "
+                + "if verification succeeds.");
         ButtonType stay = new ButtonType("Keep updating", ButtonBar.ButtonData.OK_DONE);
         quitSkipType = new ButtonType("Skip update", ButtonBar.ButtonData.OTHER);
         alert.getButtonTypes().setAll(stay, quitSkipType);
