@@ -4,7 +4,7 @@
 # a minimal -javaagent JVM argument (no inline parameters).
 #
 # Usage:
-#   setup-agent.sh <minecraft-instance-dir> [update-server-url]
+#   setup-agent.sh <minecraft-instance-dir> [update-server-url] <manifest-public-key-base64>
 #
 # Example:
 #   setup-agent.sh ~/.minecraft http://192.168.1.100:25565
@@ -13,13 +13,18 @@
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 <minecraft-instance-dir> [update-server-url]"
+    echo "Usage: $0 <minecraft-instance-dir> [update-server-url] <manifest-public-key-base64>"
     echo "Example: $0 ~/.minecraft/versions/1.20.1 http://192.168.1.100:25565"
     exit 1
 fi
 
 INSTANCE_DIR="$1"
 SERVER_URL="${2:-http://localhost:25565}"
+MANIFEST_PUBLIC_KEY="${3:-}"
+if [ -z "$MANIFEST_PUBLIC_KEY" ]; then
+    echo "[setup] ERROR: manifest public key is required (Base64 X.509 Ed25519 key)."
+    exit 1
+fi
 
 # Determine Agent JAR path (same directory as this script)
 AGENT_JAR="$(cd "$(dirname "$0")" && pwd)/UpdateAgent.jar"
@@ -41,6 +46,7 @@ CONFIG_FILE="$INSTANCE_DIR/mc-update.properties"
 cat > "$CONFIG_FILE" << EOF
 # Minecraft Update Agent Configuration
 server=$SERVER_URL
+manifest-public-key=$MANIFEST_PUBLIC_KEY
 EOF
 echo "[setup] Config written: $CONFIG_FILE"
 

@@ -5,7 +5,7 @@ REM Creates mc-update.properties in the instance directory and appends
 REM a minimal -javaagent JVM argument (no inline parameters).
 REM
 REM Usage:
-REM   setup-agent.bat <minecraft-instance-dir> [update-server-url]
+REM   setup-agent.bat <minecraft-instance-dir> [update-server-url] ^<manifest-public-key-base64^>
 REM
 REM Example:
 REM   setup-agent.bat C:\Users\You\AppData\Roaming\.minecraft http://192.168.1.100:25565
@@ -14,7 +14,7 @@ REM ─────────────────────────�
 setlocal enabledelayedexpansion
 
 if "%~1"=="" (
-    echo Usage: %~nx0 ^<minecraft-instance-dir^> [update-server-url]
+    echo Usage: %~nx0 ^<minecraft-instance-dir^> [update-server-url] ^<manifest-public-key-base64^>
     echo Example: %~nx0 C:\Users\You\AppData\Roaming\.minecraft http://192.168.1.100:25565
     exit /b 1
 )
@@ -22,6 +22,11 @@ if "%~1"=="" (
 set INSTANCE_DIR=%~1
 set SERVER_URL=%~2
 if "%SERVER_URL%"=="" set SERVER_URL=http://localhost:25565
+set MANIFEST_PUBLIC_KEY=%~3
+if "%MANIFEST_PUBLIC_KEY%"=="" (
+    echo [setup] ERROR: manifest public key is required (Base64 X.509 Ed25519 key).
+    exit /b 1
+)
 
 REM Determine Agent JAR path (same directory as this script)
 set AGENT_JAR=%~dp0UpdateAgent.jar
@@ -42,6 +47,7 @@ REM ---- Write persistent config file ----
 set CONFIG_FILE=%INSTANCE_DIR%\mc-update.properties
 echo # Minecraft Update Agent Configuration> "%CONFIG_FILE%"
 echo server=%SERVER_URL%>> "%CONFIG_FILE%"
+echo manifest-public-key=%MANIFEST_PUBLIC_KEY%>> "%CONFIG_FILE%"
 echo [setup] Config written: %CONFIG_FILE%
 
 REM ---- Add -javaagent JVM argument (JAR path only, no inline params) ----

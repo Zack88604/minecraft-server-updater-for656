@@ -69,7 +69,7 @@ sequenceDiagram
     L->>A: load UpdateAgent_core.jar + delegate
     A->>A: resolve config, pick GUI adapter
     A->>A: runtime preflight: verify + repair (progress, 10s stall watchdog)
-    A->>S: GET /api/v2/manifest
+    A->>S: GET /api/v3/manifest (signed)
     A->>A: agent self-update check
     loop each managed file
         A->>A: SHA-256 compare
@@ -125,11 +125,11 @@ docker exec mc-update python3 /app/generate_manifest.py \
 ```bash
 # Linux/macOS (requires a JDK with javac)
 bash agent/build.sh
-bash agent/setup-agent.sh ~/.minecraft/versions/1.20.1 http://your-server:25565
+bash agent/setup-agent.sh ~/.minecraft/versions/1.20.1 http://your-server:25565 BASE64_X509_ED25519_PUBLIC_KEY
 
 # Windows
 agent\build.bat
-agent\setup-agent.bat C:\path\to\instance http://your-server:25565
+agent\setup-agent.bat C:\path\to\instance http://your-server:25565 BASE64_X509_ED25519_PUBLIC_KEY
 ```
 
 `build.sh` / `build.bat` auto-download the JavaFX 21.0.4 build jars from Maven
@@ -162,11 +162,29 @@ launched from that installation), not in the game directory:
     └── 21.0.4/                           # module jars verified against the embedded spec
 ```
 
+## Signed-manifest setup
+
+The server generates its persistent Ed25519 signing key under `/data/manifest-keys/` the first time it signs a manifest. Its private key is never exposed. Copy `/data/manifest-keys/manifest-signing-public.der.base64` to each client through an authenticated administrator channel and pin it in `mc-update.properties`:
+
+```properties
+server=http://your-server:25565
+manifest-public-key=BASE64_X509_ED25519_PUBLIC_KEY
+# Optional: manifest-key-id=ed25519-0123456789abcdef
+```
+
+When no public key is configured, the client shows a one-time confirmation with the server URL, key ID, and SHA-256 fingerprint; approval pins the key locally. A pinned key is never replaced automatically. The client fetches `/api/v3/manifest` and verifies the Ed25519 signature, expiry, and embedded manifest hash before touching files. The agent runtime requires Java 15 or later for Ed25519. `/api/v3/manifest-public-key` is for administrator inspection only; clients never trust it automatically. `/api/v2/manifest` remains available for legacy clients.
+
+## Safe skip update
+
+After a complete update, the agent verifies every manifest resource locally and atomically caches the already Ed25519-signed v3 envelope in `.mc-update/signed-manifest-cache.properties`. When the user confirms skipping an in-progress update, the agent first rolls back that run, then re-verifies the cached Ed25519 signature, expiry, server identity, manifest hash, and SHA-256/size of every listed local resource. Any missing, changed, expired, or manually modified cache entry blocks Minecraft startup.
+
 ## API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/v2/manifest` | GET | Full file manifest (paths, SHA-256, sizes) |
+| `/api/v3/manifest` | GET | Ed25519-signed manifest envelope for pinned-key clients |
+| `/api/v3/manifest-public-key` | GET | Public-key descriptor for administrator pinning |
 | `/api/files/<path>` | GET | Download a resource file |
 | `/api/agent` | GET | Download the latest `UpdateAgent_core.jar` |
 | `/api/v2/gui-preset` | GET | Optional server GUI-preset descriptor |
@@ -204,6 +222,7 @@ See [GUI Adapter API](GUI_ADAPTER_API.md) for the full tutorial and API referenc
 |----------|---------|-------------|
 | `PORT` | `25565` | HTTP port |
 | `GENERATE_TOKEN` | *(empty)* | Protects `/api/generate` |
+| `MANIFEST_SIGNATURE_TTL_SECONDS` | `604800` | Signed-manifest lifetime (1 second–31 days) |
 | `DEBUG` | `false` | Flask debug mode |
 
 ### Agent (JVM properties)
@@ -224,6 +243,8 @@ Configuration is resolved in this order (normal mode):
 | `mc-update.debug` | `false` | Keep GUI open after sync |
 | `mc-update.gui-adapter` | *(built-in JavaFX, Swing fallback)* | Fully qualified `GuiAdapterFactory` class |
 | `mc-update.server-gui` | `disabled` | `disabled`, `recommended`, or `required` server-preset policy |
+| `mc-update.manifest-public-key` | *(required)* | Base64 X.509 Ed25519 public key pinned by the administrator |
+| `mc-update.manifest-key-id` | *(optional)* | Expected `ed25519-…` key identifier |
 
 The built-in JavaFX GUI needs JDK 17+ and downloads its JavaFX 21 runtime from
 Maven Central on first use (see *Embedded JavaFX GUI*). The download runs as a

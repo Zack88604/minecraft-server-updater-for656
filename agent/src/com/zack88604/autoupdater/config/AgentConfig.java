@@ -23,21 +23,27 @@ public final class AgentConfig {
     public static final String PROP_DEBUG = "mc-update.debug";
     public static final String PROP_GUI_ADAPTER = "mc-update.gui-adapter";
     public static final String PROP_SERVER_GUI_MODE = "mc-update.server-gui";
+    public static final String PROP_MANIFEST_PUBLIC_KEY = "mc-update.manifest-public-key";
+    public static final String PROP_MANIFEST_KEY_ID = "mc-update.manifest-key-id";
 
     private static final String CONFIG_FILE = "mc-update.properties";
     public static final String DEFAULT_SERVER = "http://localhost:25565";
 
     private final String gameDir;
     private final String server;
+    private final String manifestPublicKey;
+    private final String manifestKeyId;
     private final boolean debug;
     private final boolean admin;
     private final String guiAdapterFactoryClassName;
     private final ServerGuiMode serverGuiMode;
 
-    private AgentConfig(String gameDir, String server, boolean debug, boolean admin,
+    private AgentConfig(String gameDir, String server, String manifestPublicKey, String manifestKeyId, boolean debug, boolean admin,
                         String guiAdapterFactoryClassName, ServerGuiMode serverGuiMode) {
         this.gameDir = gameDir;
         this.server = server;
+        this.manifestPublicKey = manifestPublicKey;
+        this.manifestKeyId = manifestKeyId;
         this.debug = debug;
         this.admin = admin;
         this.guiAdapterFactoryClassName = guiAdapterFactoryClassName;
@@ -77,6 +83,8 @@ public final class AgentConfig {
         String debugValue;
         String guiAdapterFactory;
         String serverGuiModeValue;
+        String manifestPublicKey;
+        String manifestKeyId;
         if (admin) {
             server = coalesce(
                     arguments.get("server"),
@@ -101,6 +109,8 @@ public final class AgentConfig {
                     fileConfig.getProperty("server-gui"),
                     ServerGuiMode.DISABLED.name()
             );
+            manifestPublicKey = coalesce(arguments.get("manifest-public-key"), system.getProperty(PROP_MANIFEST_PUBLIC_KEY), fileConfig.getProperty("manifest-public-key"));
+            manifestKeyId = coalesce(arguments.get("manifest-key-id"), system.getProperty(PROP_MANIFEST_KEY_ID), fileConfig.getProperty("manifest-key-id"));
         } else {
             server = coalesce(
                     fileConfig.getProperty("server"),
@@ -125,9 +135,11 @@ public final class AgentConfig {
                     system.getProperty(PROP_SERVER_GUI_MODE),
                     ServerGuiMode.DISABLED.name()
             );
+            manifestPublicKey = coalesce(fileConfig.getProperty("manifest-public-key"), arguments.get("manifest-public-key"), system.getProperty(PROP_MANIFEST_PUBLIC_KEY));
+            manifestKeyId = coalesce(fileConfig.getProperty("manifest-key-id"), arguments.get("manifest-key-id"), system.getProperty(PROP_MANIFEST_KEY_ID));
         }
 
-        return new AgentConfig(gameDir, server, isTrue(debugValue), admin,
+        return new AgentConfig(gameDir, server, manifestPublicKey, manifestKeyId, isTrue(debugValue), admin,
                 guiAdapterFactory, ServerGuiMode.parse(serverGuiModeValue));
     }
 
@@ -142,6 +154,10 @@ public final class AgentConfig {
     public String getServer() {
         return server;
     }
+
+    public String getManifestPublicKey() { return manifestPublicKey; }
+
+    public String getManifestKeyId() { return manifestKeyId; }
 
     public boolean isDebug() {
         return debug;

@@ -113,7 +113,7 @@ public final class UpdateController implements UpdateViewActions {
 
         if (currentClosePolicy == ClosePolicy.CONFIRM) {
             if (markCloseRequested(true)) {
-                rollbackThenLaunch(false);
+                rollbackThenVerifyCachedManifestAndLaunch(false);
             }
             return;
         }
@@ -134,7 +134,7 @@ public final class UpdateController implements UpdateViewActions {
 
         if (currentClosePolicy == ClosePolicy.CONFIRM) {
             if (markCloseRequested(true)) {
-                rollbackThenLaunch(true);
+                rollbackThenVerifyCachedManifestAndLaunch(true);
             }
             return;
         }
@@ -166,27 +166,28 @@ public final class UpdateController implements UpdateViewActions {
         }
     }
 
-    private void rollbackThenLaunch(boolean viewAlreadyClosed) {
+    private void rollbackThenVerifyCachedManifestAndLaunch(boolean viewAlreadyClosed) {
         Thread rollback = new Thread(() -> {
             try {
                 workerFinished.await();
                 service.rollbackCancelledUpdate();
+                service.verifyCachedManifest(this::onUpdateEvent);
                 launchLatch.countDown();
                 if (!viewAlreadyClosed) {
                     closeView();
                 }
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
-                handleRollbackFailure(exception, viewAlreadyClosed);
+                handleSkipFailure(exception, viewAlreadyClosed);
             } catch (IOException exception) {
-                handleRollbackFailure(exception, viewAlreadyClosed);
+                handleSkipFailure(exception, viewAlreadyClosed);
             }
         }, "update-rollback");
         rollback.setDaemon(true);
         rollback.start();
     }
 
-    private void handleRollbackFailure(Throwable cause, boolean viewAlreadyClosed) {
+    private void handleSkipFailure(Throwable cause, boolean viewAlreadyClosed) {
         if (viewAlreadyClosed) {
             cause.printStackTrace();
             System.exit(1);
@@ -197,7 +198,7 @@ public final class UpdateController implements UpdateViewActions {
         }
         String message = cause.getMessage() != null ? cause.getMessage() : cause.toString();
         onUpdateEvent(new UpdateEvent.Failed(
-                "Unable to restore files after cancelling the update: " + message, cause));
+                "Unable to skip the update safely; Minecraft will not start: " + message, cause));
     }
 
     private void startWorker() {

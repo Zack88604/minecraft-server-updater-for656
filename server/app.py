@@ -18,6 +18,7 @@ import zipfile
 from urllib.parse import quote
 
 from flask import Flask, jsonify, send_file, abort, request
+from manifest_signing import public_key_descriptor, sign_manifest
 
 # Configuration
 DATA_DIR = os.environ.get('DATA_DIR', '/data')
@@ -254,6 +255,35 @@ def api_manifest():
     return jsonify(manifest)
 
 
+@app.route('/api/v3/manifest', methods=['GET'])
+def api_manifest_v3():
+    """Return an Ed25519-signed manifest for clients with a pinned public key."""
+    manifest = _load_manifest()
+    if manifest is None:
+        return jsonify({'error': 'manifest not available'}), 503
+    try:
+        envelope = sign_manifest(DATA_DIR, manifest, logger)
+    except RuntimeError as error:
+        logger.error('Unable to sign manifest: %s', error)
+        return jsonify({'error': 'signed manifest not available'}), 503
+    response = jsonify(envelope)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.route('/api/v3/manifest-public-key', methods=['GET'])
+def api_manifest_public_key():
+    """Expose the public key for administrator pinning; clients never TOFU it."""
+    try:
+        descriptor = public_key_descriptor(DATA_DIR, logger)
+    except RuntimeError as error:
+        logger.error('Unable to export manifest public key: %s', error)
+        return jsonify({'error': 'manifest key not available'}), 503
+    response = jsonify(descriptor)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 @app.route('/api/v2/gui-preset', methods=['GET'])
 def api_gui_preset():
     """Return one optional server GUI-preset descriptor."""
@@ -364,6 +394,16 @@ def api_generate():
                 'output': result.stdout,
                 'error': result.stderr,
             }), 500
+
+    if 'manifest' in targets:
+        manifest = _load_manifest()
+        if manifest is None:
+            return jsonify({'error': 'manifest generated but is not readable'}), 500
+        try:
+            sign_manifest(DATA_DIR, manifest, logger)
+        except RuntimeError as error:
+            logger.error('Manifest generated but could not be signed: %s', error)
+            return jsonify({'error': 'manifest generated but signing failed'}), 500
 
     if descriptor is not None:
         try:
