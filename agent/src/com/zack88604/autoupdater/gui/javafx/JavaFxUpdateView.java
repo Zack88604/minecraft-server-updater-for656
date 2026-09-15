@@ -1,5 +1,6 @@
 package com.zack88604.autoupdater.gui.javafx;
 
+import com.zack88604.autoupdater.gui.api.ClosePolicy;
 import com.zack88604.autoupdater.gui.api.DownloadProgress;
 import com.zack88604.autoupdater.gui.api.UpdatePhase;
 import com.zack88604.autoupdater.gui.api.UpdateSummary;
@@ -348,6 +349,9 @@ final class JavaFxUpdateView implements UpdateView {
     /** The last log text rendered, for idempotent whole-set replacement. */
     private String lastRenderedLog;
 
+    /** Latest controller-owned state, used for close-policy decisions. */
+    private UpdateUiState currentState = UpdateUiState.initial();
+
     /** True once the controller asked us to close — suppresses the onCloseRequest
      *  handler from re-reporting {@code windowClosed} for our own programmatic
      *  {@code stage.close()} (v2.1 §11: a must-handle close-lifecycle detail). */
@@ -412,6 +416,7 @@ final class JavaFxUpdateView implements UpdateView {
      */
     @Override
     public void render(UpdateUiState state) {
+        currentState = Objects.requireNonNull(state, "state");
         updateDownloadWaitingState(state);
         setPhase(state.getPhase());
         errorState = state.getPhase() == UpdatePhase.ERROR ? state : null;
@@ -468,10 +473,14 @@ final class JavaFxUpdateView implements UpdateView {
                 if (counts != null) {
                     filesTotal = counts[1];
                 }
-                lblStatus.setText("Checking files…");
-                lblDescription.setText(counts != null
-                        ? formatCount(counts[0]) + " of " + formatCount(counts[1]) + " files checked"
-                        : "Checking files…");
+                if (counts != null) {
+                    lblStatus.setText("Checking files…");
+                    lblDescription.setText(formatCount(counts[0]) + " of "
+                            + formatCount(counts[1]) + " files checked");
+                } else {
+                    lblStatus.setText(displayOrDefault(state.getStatus(), "Checking files…"));
+                    lblDescription.setText(displayOrDefault(state.getDescription(), ""));
+                }
                 break;
             }
             case DOWNLOADING: {
@@ -511,12 +520,13 @@ final class JavaFxUpdateView implements UpdateView {
             case ERROR: {
                 String em = state.getErrorMessage();
                 UpdateSummary s = state.getSummary();
-                lblStatus.setText(em != null
-                        && em.startsWith("Unable to skip the update safely")
+                boolean safeSkipFailure = isSafeSkipFailure(em);
+                lblStatus.setText(safeSkipFailure
                         ? "Couldn’t skip update safely"
                         : "Update failed");
                 if (em != null && !em.isEmpty()) {
-                    lblDescription.setText(em);
+                    lblDescription.setText(safeSkipFailure
+                            ? safeSkipFailureDescription(em) : em);
                 } else if (s != null && s.getFailedFiles() > 0) {
                     lblDescription.setText(s.getFailedFiles() + " file(s) failed to update.");
                 } else {
@@ -1183,14 +1193,6 @@ final class JavaFxUpdateView implements UpdateView {
 
     // ── Window close handling ─────────────────────────────────────
 
-    /** True while the update flow is still running (non-terminal phases). */
-    private boolean isUpdateInProgress() {
-        return phase == UpdatePhase.PREPARING
-                || phase == UpdatePhase.CHECKING
-                || phase == UpdatePhase.DOWNLOADING
-                || phase == UpdatePhase.CLEANING;
-    }
-
     /**
      * Intercept the window close request. While an update is running the close
      * is consumed and the user is asked to confirm; the terminal SUCCESS/ERROR
@@ -1202,7 +1204,7 @@ final class JavaFxUpdateView implements UpdateView {
             // let it proceed, but don't re-report it as a user action.
             return;
         }
-        if (isUpdateInProgress()) {
+        if (currentState.getClosePolicy() == ClosePolicy.CONFIRM) {
             event.consume();
             confirmQuit();
         } else {
@@ -1452,6 +1454,22 @@ final class JavaFxUpdateView implements UpdateView {
                 newScene.setFill(Color.TRANSPARENT);
             }
         });
+    }
+
+    private static String displayOrDefault(String value, String fallback) {
+        return value == null || value.isEmpty() ? fallback : value;
+    }
+
+    private static boolean isSafeSkipFailure(String message) {
+        return message != null && message.startsWith("Unable to skip the update safely");
+    }
+
+    private static String safeSkipFailureDescription(String message) {
+        int separator = message.indexOf(": ");
+        String reason = separator >= 0 ? message.substring(separator + 2) : "";
+        return reason.isEmpty()
+                ? "Minecraft was not started because trusted resources could not be verified."
+                : "Minecraft was not started. " + reason;
     }
 
     // ── Construction ──────────────────────────────────────────────

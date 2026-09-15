@@ -3,6 +3,7 @@ package com.zack88604.autoupdater.application;
 import com.zack88604.autoupdater.domain.UpdateResult;
 import com.zack88604.autoupdater.gui.api.ClosePolicy;
 import com.zack88604.autoupdater.gui.api.GuiAdapter;
+import com.zack88604.autoupdater.gui.api.UpdatePhase;
 import com.zack88604.autoupdater.gui.api.UpdateUiState;
 import com.zack88604.autoupdater.gui.api.UpdateView;
 import com.zack88604.autoupdater.gui.api.UpdateViewActions;
@@ -113,6 +114,11 @@ public final class UpdateController implements UpdateViewActions {
 
         if (currentClosePolicy == ClosePolicy.CONFIRM) {
             if (markCloseRequested(true)) {
+                onUpdateEvent(new UpdateEvent.StatusChanged(
+                        UpdatePhase.CHECKING,
+                        "Safely skipping update…",
+                        "Waiting for the current operation to stop", true));
+                onUpdateEvent(UpdateEvent.DownloadProgressChanged.inactive());
                 rollbackThenVerifyCachedManifestAndLaunch(false);
             }
             return;
@@ -170,6 +176,10 @@ public final class UpdateController implements UpdateViewActions {
         Thread rollback = new Thread(() -> {
             try {
                 workerFinished.await();
+                onUpdateEvent(new UpdateEvent.StatusChanged(
+                        UpdatePhase.CHECKING,
+                        "Restoring changed files…",
+                        "Preparing the last trusted version", true));
                 service.rollbackCancelledUpdate();
                 service.verifyCachedManifest(this::onUpdateEvent);
                 launchLatch.countDown();
@@ -198,7 +208,7 @@ public final class UpdateController implements UpdateViewActions {
         }
         String message = cause.getMessage() != null ? cause.getMessage() : cause.toString();
         onUpdateEvent(new UpdateEvent.Failed(
-                "Unable to skip the update safely; Minecraft will not start: " + message, cause));
+                "Unable to skip the update safely: " + message, cause));
     }
 
     private void startWorker() {
