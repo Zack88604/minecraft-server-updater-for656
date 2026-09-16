@@ -21,6 +21,7 @@ import javafx.beans.binding.Bindings;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.geometry.Rectangle2D;
+import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
@@ -199,6 +200,8 @@ final class JavaFxUpdateView implements UpdateView {
     private static final String IMG_CLEANING = "/images/cleaning.png";
     private static final String IMG_SUCCESS = "/images/success.png";
     private static final String IMG_ERROR = "/images/error.png";
+    private static final String IMG_POPUP = "/images/popup.png";
+    private static final String IMG_TROUBLE = "/images/trouble.png";
 
     // Overall progress area
     private final Label lblStatus = new Label("Preparing update…");
@@ -1091,7 +1094,7 @@ final class JavaFxUpdateView implements UpdateView {
         IMG_PREPARING, IMG_UPDATER, IMG_CHECKING, IMG_DOWNLOADING,
         IMG_DOWNLOADING_WAITING[0], IMG_DOWNLOADING_WAITING[1],
         IMG_DOWNLOADING_WAITING[2],
-        IMG_CLEANING, IMG_SUCCESS, IMG_ERROR,
+        IMG_CLEANING, IMG_SUCCESS, IMG_ERROR, IMG_POPUP, IMG_TROUBLE,
     };
 
     /**
@@ -1389,9 +1392,10 @@ final class JavaFxUpdateView implements UpdateView {
         Label header = new Label("Quit update?");
         header.getStyleClass().add("dialog-header");
         alert.getDialogPane().setHeader(header);
-        alert.setContentText("Skipping will restore files changed during this update and verify "
+        alert.getDialogPane().setContent(dialogContentWithIllustration(dialogMessage(
+                "Skipping will restore files changed during this update and verify "
                 + "the last trusted version. Keep this window open; Minecraft will start only "
-                + "if verification succeeds.");
+                + "if verification succeeds."), IMG_POPUP));
         ButtonType stay = new ButtonType("Keep updating", ButtonBar.ButtonData.OK_DONE);
         quitSkipType = new ButtonType("Skip update", ButtonBar.ButtonData.OTHER);
         alert.getButtonTypes().setAll(stay, quitSkipType);
@@ -1436,7 +1440,7 @@ final class JavaFxUpdateView implements UpdateView {
             item.setMaxWidth(360);
             suggestions.getChildren().add(item);
         }
-        alert.getDialogPane().setContent(suggestions);
+        alert.getDialogPane().setContent(dialogContentWithIllustration(suggestions, IMG_TROUBLE));
 
         ButtonType close = new ButtonType("Close", ButtonBar.ButtonData.CANCEL_CLOSE);
         alert.getButtonTypes().setAll(close);
@@ -1485,10 +1489,10 @@ final class JavaFxUpdateView implements UpdateView {
         Label header = new Label("Update failed");
         header.getStyleClass().add("dialog-header");
         alert.getDialogPane().setHeader(header);
-        alert.setContentText(displayOrDefault(state.getErrorMessage(),
-                "The update could not be completed.")
+        alert.getDialogPane().setContent(dialogContentWithIllustration(dialogMessage(
+                displayOrDefault(state.getErrorMessage(), "The update could not be completed.")
                 + "\n\nYou can exit, or try the last trusted version. Minecraft starts only "
-                + "after its signed manifest and every local resource are verified.");
+                + "after its signed manifest and every local resource are verified."), IMG_POPUP));
 
         recoveryTrustedType = new ButtonType("Use trusted version", ButtonBar.ButtonData.OK_DONE);
         ButtonType exit = new ButtonType("Exit", ButtonBar.ButtonData.CANCEL_CLOSE);
@@ -1528,6 +1532,45 @@ final class JavaFxUpdateView implements UpdateView {
                 newScene.setFill(Color.TRANSPARENT);
             }
         });
+    }
+
+    /** A wrapping text node for dialog copy placed beside the popup art. */
+    private static Label dialogMessage(String text) {
+        Label message = new Label(text);
+        message.setWrapText(true);
+        message.setMaxWidth(360);
+        message.getStyleClass().add("dialog-message");
+        return message;
+    }
+
+    /**
+     * Place the requested character illustration to the left of a dialog's original
+     * content. It uses the same 64x64 fit, ratio preservation and smoothing as
+     * the main status illustration. A missing image safely leaves the original
+     * dialog content unchanged.
+     */
+    private Node dialogContentWithIllustration(Node content, String resource) {
+        Image image = statusImages.get(resource);
+        if (image == null) {
+            return content;
+        }
+        ImageView illustration = new ImageView(image);
+        illustration.setPreserveRatio(true);
+        illustration.setSmooth(true);
+        illustration.setFitWidth(STATUS_IMAGE_SIZE);
+        illustration.setFitHeight(STATUS_IMAGE_SIZE);
+        illustration.getStyleClass().add("status-image");
+
+        StackPane illustrationSlot = new StackPane(illustration);
+        illustrationSlot.setMinSize(STATUS_IMAGE_SIZE, STATUS_IMAGE_SIZE);
+        illustrationSlot.setPrefSize(STATUS_IMAGE_SIZE, STATUS_IMAGE_SIZE);
+        illustrationSlot.setMaxSize(STATUS_IMAGE_SIZE, STATUS_IMAGE_SIZE);
+
+        HBox row = new HBox(16, illustrationSlot, content);
+        row.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(content, Priority.ALWAYS);
+        row.getStyleClass().add("dialog-content-with-art");
+        return row;
     }
 
     private static String displayOrDefault(String value, String fallback) {

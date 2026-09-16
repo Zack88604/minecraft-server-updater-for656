@@ -563,8 +563,13 @@
     -fx-text-fill: #A8B0BA;
 }
 
-.dialog-pane > .content.label {
+.dialog-pane > .content.label,
+.dialog-pane .dialog-message {
     -fx-font-size: 13px;
+}
+
+.dialog-content-with-art {
+    -fx-alignment: center-left;
 }
 
 .help-dialog {
