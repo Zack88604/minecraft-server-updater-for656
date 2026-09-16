@@ -16,6 +16,9 @@ interface JavaFxViewListener {
     /** The user explicitly skipped the in-progress update. */
     void userRequestedClose();
 
+    /** The user chose the last trusted version after a fatal update failure. */
+    void userRequestedSkipUpdate();
+
     /** The window was closed while no update was in progress. */
     void windowClosed();
 

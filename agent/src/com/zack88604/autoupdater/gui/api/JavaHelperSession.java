@@ -72,6 +72,11 @@ public final class JavaHelperSession {
         send(JavaHelperProtocol.HelperAction.REQUEST_CLOSE);
     }
 
+    /** Ask the controller to skip a failed update after cache verification. */
+    public void requestSkipUpdate() {
+        send(JavaHelperProtocol.HelperAction.REQUEST_SKIP_UPDATE);
+    }
+
     /** Tell the updater that the helper's native window is now closed. */
     public void notifyWindowClosed() {
         send(JavaHelperProtocol.HelperAction.WINDOW_CLOSED);

@@ -68,7 +68,7 @@ final class SwingUpdateView implements UpdateView {
         renderDownloadProgress(state.getDownloadProgress());
         renderLog(state.getLogLines());
         renderClosePolicy(state.getClosePolicy());
-        showErrorIfNeeded(state.getErrorMessage());
+        showErrorIfNeeded(state);
     }
 
     @Override
@@ -227,12 +227,27 @@ final class SwingUpdateView implements UpdateView {
         }
     }
 
-    private void showErrorIfNeeded(String errorMessage) {
-        if (errorMessage != null && !errorMessage.equals(shownError)) {
-            shownError = errorMessage;
-            JOptionPane.showMessageDialog(frame, errorMessage,
-                    "Update Error", JOptionPane.ERROR_MESSAGE);
+    private void showErrorIfNeeded(UpdateUiState state) {
+        String errorMessage = state.getErrorMessage();
+        if (errorMessage == null || errorMessage.equals(shownError)) {
+            return;
         }
+        shownError = errorMessage;
+        if (state.getClosePolicy() == ClosePolicy.SKIP_OR_EXIT) {
+            int choice = JOptionPane.showConfirmDialog(frame,
+                    errorMessage + "\n\nSkip this update? Minecraft starts only if the signed cached "
+                            + "manifest verifies every local resource.",
+                    "Update Error (" + state.getErrorCode() + ")",
+                    JOptionPane.YES_NO_OPTION, JOptionPane.ERROR_MESSAGE);
+            if (choice == JOptionPane.YES_OPTION) {
+                actions.requestSkipUpdate();
+            } else {
+                actions.requestClose();
+            }
+            return;
+        }
+        JOptionPane.showMessageDialog(frame, errorMessage,
+                "Update Error (" + state.getErrorCode() + ")", JOptionPane.ERROR_MESSAGE);
     }
 
     private static String formatSpeed(double bytesPerSecond) {

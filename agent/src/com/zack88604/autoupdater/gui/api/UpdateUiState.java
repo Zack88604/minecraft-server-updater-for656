@@ -27,6 +27,7 @@ public final class UpdateUiState {
     private final ClosePolicy closePolicy;
     private final UpdateSummary summary;
     private final String errorMessage;
+    private final UpdateErrorCode errorCode;
 
     private UpdateUiState(Builder builder) {
         phase = builder.phase;
@@ -41,6 +42,7 @@ public final class UpdateUiState {
         closePolicy = builder.closePolicy;
         summary = builder.summary;
         errorMessage = builder.errorMessage;
+        errorCode = builder.errorCode;
     }
 
     /** Return the initial Preparing snapshot for a new update session. */
@@ -106,6 +108,11 @@ public final class UpdateUiState {
         return errorMessage;
     }
 
+    /** Return the machine-readable category for the current failure. */
+    public UpdateErrorCode getErrorCode() {
+        return errorCode;
+    }
+
     private static List<String> immutableCopy(List<String> values) {
         return Collections.unmodifiableList(new ArrayList<>(values));
     }
@@ -125,6 +132,7 @@ public final class UpdateUiState {
         private ClosePolicy closePolicy = ClosePolicy.CONFIRM;
         private UpdateSummary summary;
         private String errorMessage;
+        private UpdateErrorCode errorCode;
 
         private Builder() {
         }
@@ -189,6 +197,12 @@ public final class UpdateUiState {
 
         public Builder errorMessage(String value) {
             errorMessage = value;
+            return this;
+        }
+
+        /** Set the machine-readable category for the current failure. */
+        public Builder errorCode(UpdateErrorCode value) {
+            errorCode = value;
             return this;
         }
 

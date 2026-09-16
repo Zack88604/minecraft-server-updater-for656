@@ -20,7 +20,7 @@ import java.util.List;
 public final class JavaHelperProtocol {
 
     /** Current wire version. It is encoded inside each rendered snapshot. */
-    public static final int VERSION = 1;
+    public static final int VERSION = 2;
 
     /** Messages that a helper may send to the updater. */
     public enum HelperAction {
@@ -28,6 +28,7 @@ public final class JavaHelperProtocol {
         BEGIN_CLOSE_CONFIRMATION,
         CANCEL_CLOSE_CONFIRMATION,
         REQUEST_CLOSE,
+        REQUEST_SKIP_UPDATE,
         WINDOW_CLOSED
     }
 
@@ -142,6 +143,8 @@ public final class JavaHelperProtocol {
                 output.writeInt(summary.getFailedFiles());
             }
             writeNullableText(output, state.getErrorMessage());
+            writeNullableText(output, state.getErrorCode() == null
+                    ? null : state.getErrorCode().name());
         }
         return bytes.toByteArray();
     }
@@ -180,6 +183,10 @@ public final class JavaHelperProtocol {
                 builder.summary(new UpdateSummary(input.readInt(), input.readInt()));
             }
             builder.errorMessage(readNullableText(input));
+            String errorCode = readNullableText(input);
+            if (errorCode != null) {
+                builder.errorCode(UpdateErrorCode.valueOf(errorCode));
+            }
             if (input.available() != 0) {
                 throw new IOException("Unexpected trailing helper state data");
             }

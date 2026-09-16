@@ -1,5 +1,6 @@
 package com.zack88604.autoupdater.application;
 
+import com.zack88604.autoupdater.gui.api.UpdateErrorCode;
 import com.zack88604.autoupdater.gui.api.UpdatePhase;
 
 import java.util.ArrayList;
@@ -188,10 +189,23 @@ public abstract class UpdateEvent {
     public static final class Failed extends UpdateEvent {
         private final String message;
         private final Throwable cause;
+        private final UpdateErrorCode errorCode;
+        private final boolean skipUpdateAllowed;
 
         public Failed(String message, Throwable cause) {
+            this(message, cause, UpdateErrorCode.UNKNOWN, true);
+        }
+
+        public Failed(String message, Throwable cause, UpdateErrorCode errorCode) {
+            this(message, cause, errorCode, true);
+        }
+
+        public Failed(String message, Throwable cause, UpdateErrorCode errorCode,
+                      boolean skipUpdateAllowed) {
             this.message = Objects.requireNonNull(message, "message");
             this.cause = Objects.requireNonNull(cause, "cause");
+            this.errorCode = Objects.requireNonNull(errorCode, "errorCode");
+            this.skipUpdateAllowed = skipUpdateAllowed;
         }
 
         public String getMessage() {
@@ -200,6 +214,14 @@ public abstract class UpdateEvent {
 
         public Throwable getCause() {
             return cause;
+        }
+
+        public UpdateErrorCode getErrorCode() {
+            return errorCode;
+        }
+
+        public boolean isSkipUpdateAllowed() {
+            return skipUpdateAllowed;
         }
     }
 }

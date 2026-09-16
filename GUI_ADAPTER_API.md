@@ -257,6 +257,7 @@ Your view never decides outcomes; it only reports **intent** through
 | `beginCloseConfirmation()` | Immediately before opening a `CONFIRM` dialog. The worker pauses at its next safe checkpoint. |
 | `cancelCloseConfirmation()` | When the user rejects or dismisses that dialog. The worker resumes. |
 | `requestClose()` | After the user confirmed closing, or immediately when the policy is `ALLOW`. |
+| `requestSkipUpdate()` | When a `SKIP_OR_EXIT` failure dialog is accepted; the controller rolls back and verifies the signed cache before launching. |
 | `notifyWindowClosed()` | The native window has actually finished closing. |
 
 The controller applies the current **close policy** from the state:
@@ -265,6 +266,7 @@ The controller applies the current **close policy** from the state:
 |---------------|------|-------------------|
 | `CONFIRM` | Update in progress | Set the native close operation to "do nothing", call `beginCloseConfirmation()` immediately before showing a toolkit-specific warning, and call `cancelCloseConfirmation()` if it is rejected. If confirmed, call `requestClose()`: the updater cancels, restores every file changed in this update, then starts Minecraft and closes the view. |
 | `ALLOW` | Update succeeded | Closing is allowed; the latch is released and the window closes. |
+| `SKIP_OR_EXIT` | A fatal error escaped the update | Offer “skip update”; call `requestSkipUpdate()` only if accepted. The controller restores changed files and launches only after signed-cache verification. A normal close exits. |
 | `EXIT_FAILURE` | Update failed | Any close (requested or native) calls `System.exit(1)` — **Minecraft will not start**. |
 
 > Never release the latch or call `System.exit` yourself. The controller owns both.
@@ -414,6 +416,7 @@ All three are invoked on your UI thread through your dispatcher.
 void beginCloseConfirmation();  // pause before showing a CONFIRM dialog
 void cancelCloseConfirmation(); // resume after the dialog is rejected
 void requestClose();            // the user confirmed closing
+void requestSkipUpdate();       // user accepts a SKIP_OR_EXIT dialog
 void notifyWindowClosed();      // the native window finished closing
 ```
 
@@ -421,7 +424,7 @@ Implemented by the controller — see [Step 5](#step-5--handle-close-correctly).
 
 ### 4.6 `ClosePolicy` (enum)
 
-`CONFIRM` · `ALLOW` · `EXIT_FAILURE` — see the table in [Step 5](#step-5--handle-close-correctly).
+`CONFIRM` · `ALLOW` · `SKIP_OR_EXIT` · `EXIT_FAILURE` — see the table in [Step 5](#step-5--handle-close-correctly).
 
 ### 4.7 `GuiAdapterContext` (immutable)
 
@@ -449,6 +452,7 @@ Presentation settings only — no services, no mutable config, no process contro
 | `ClosePolicy` | `getClosePolicy()` | How a close request is treated. |
 | `UpdateSummary` | `getSummary()` | Terminal result; `null` while running. |
 | `String` | `getErrorMessage()` | Display-safe failure text; `null` when none. |
+| `UpdateErrorCode` | `getErrorCode()` | Machine-readable failure category; `null` when none. |
 
 Build helpers: `UpdateUiState.initial()`, `UpdateUiState.builder()`. Render **the
 whole object** in `render(...)`; treat it as immutable. A view may keep the latest

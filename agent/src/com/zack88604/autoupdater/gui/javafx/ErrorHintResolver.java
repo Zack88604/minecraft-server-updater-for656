@@ -1,5 +1,6 @@
 package com.zack88604.autoupdater.gui.javafx;
 
+import com.zack88604.autoupdater.gui.api.UpdateErrorCode;
 import com.zack88604.autoupdater.gui.api.UpdateUiState;
 
 import java.util.ArrayList;
@@ -15,8 +16,21 @@ final class ErrorHintResolver {
     static List<String> resolve(UpdateUiState state) {
         String context = buildContext(state).toLowerCase(Locale.ROOT);
         List<String> hints = new ArrayList<>(3);
+        UpdateErrorCode errorCode = state.getErrorCode();
 
-        if (containsAny(context, "timeout", "timed out", "connection", "connect",
+        if (errorCode == UpdateErrorCode.NETWORK) {
+            hints.add("Check your internet connection, then try the update again.");
+            hints.add("If you use a proxy, VPN, or firewall, allow the updater to reach the update server.");
+        } else if (errorCode == UpdateErrorCode.MANIFEST_AUTHENTICATION) {
+            hints.add("Do not bypass this warning or accept an unverified update source.");
+            hints.add("Ask the server administrator to verify the configured Ed25519 key and manifest signature.");
+        } else if (errorCode == UpdateErrorCode.CONFIGURATION) {
+            hints.add("Check the server URL and manifest key in mc-update.properties.");
+            hints.add("Ask the server administrator for the expected configuration values.");
+        } else if (errorCode == UpdateErrorCode.FILESYSTEM) {
+            hints.add("Close Minecraft and any launcher or program using files in the game folder.");
+            hints.add("Make sure the game folder is writable and the drive has enough free space.");
+        } else if (containsAny(context, "timeout", "timed out", "connection", "connect",
                 "network", "socket", "reset by peer", "unreachable", "dns",
                 "unknown host", "http", "ssl", "certificate")) {
             hints.add("Check your internet connection, then try the update again.");

@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       messages, {@code state} is a decoded snapshot;</li>
  *   <li>forwards user actions (window close, debug close button, close
  *       confirmation) back over the protocol channel as {@code windowClosed} /
- *       {@code closeRequested} / {@code beginCloseConfirmation} /
+ *       {@code closeRequested} / {@code skipUpdateRequested} / {@code beginCloseConfirmation} /
  *       {@code cancelCloseConfirmation}.</li>
  * </ul>
  *
@@ -197,6 +197,11 @@ public final class JavaFxEntryPoint {
         @Override
         public void userRequestedClose() {
             protocolOut.println(UiStateCodec.encodeCloseRequested());
+        }
+
+        @Override
+        public void userRequestedSkipUpdate() {
+            protocolOut.println(UiStateCodec.encodeSkipUpdateRequested());
         }
 
         @Override

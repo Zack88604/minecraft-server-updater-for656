@@ -26,6 +26,19 @@ public interface UpdateViewActions {
     /** The user confirmed that the updater window should close. */
     void requestClose();
 
+    /**
+     * Ask the controller to skip a failed update safely.
+     *
+     * <p>This action is valid only while the state uses
+     * {@link ClosePolicy#SKIP_OR_EXIT}. The controller restores any files
+     * changed by the failed run and verifies local resources against the signed
+     * cached manifest before releasing the Minecraft launch latch.</p>
+     */
+    default void requestSkipUpdate() {
+        // Older controller implementations fail closed by treating this as exit.
+        requestClose();
+    }
+
     /** The native window has finished closing. */
     void notifyWindowClosed();
 }

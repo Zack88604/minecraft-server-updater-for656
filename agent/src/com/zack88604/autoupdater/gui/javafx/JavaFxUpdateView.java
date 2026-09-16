@@ -279,6 +279,8 @@ final class JavaFxUpdateView implements UpdateView {
     // no space in any other phase.
     private final Button btnErrorHelp = new Button("? Get help");
     private UpdateUiState errorState;
+    private String shownRecoveryError;
+    private boolean recoveryDecisionPending;
 
     // Persistent bottom copyright line (always the last row of the root).
     private final Label lblFooter = new Label();
@@ -345,6 +347,9 @@ final class JavaFxUpdateView implements UpdateView {
 
     /** The destructive "Skip update" action, created per Quit-alert instance. */
     private ButtonType quitSkipType;
+
+    /** The safe recovery action, created per fatal-error dialog instance. */
+    private ButtonType recoveryTrustedType;
 
     /** The last log text rendered, for idempotent whole-set replacement. */
     private String lastRenderedLog;
@@ -417,6 +422,9 @@ final class JavaFxUpdateView implements UpdateView {
     @Override
     public void render(UpdateUiState state) {
         currentState = Objects.requireNonNull(state, "state");
+        if (state.getClosePolicy() != ClosePolicy.SKIP_OR_EXIT) {
+            recoveryDecisionPending = false;
+        }
         updateDownloadWaitingState(state);
         setPhase(state.getPhase());
         errorState = state.getPhase() == UpdatePhase.ERROR ? state : null;
@@ -429,6 +437,7 @@ final class JavaFxUpdateView implements UpdateView {
         applyServer(state);
         applyLog(state);
         applyCloseButton(state);
+        showRecoveryChoiceIfNeeded(state);
     }
 
     /** Close the window. Must be called on the JavaFX Application Thread. */
@@ -1204,9 +1213,15 @@ final class JavaFxUpdateView implements UpdateView {
             // let it proceed, but don't re-report it as a user action.
             return;
         }
-        if (currentState.getClosePolicy() == ClosePolicy.CONFIRM) {
+        ClosePolicy policy = currentState.getClosePolicy();
+        if (policy == ClosePolicy.CONFIRM) {
             event.consume();
             confirmQuit();
+        } else if (policy == ClosePolicy.SKIP_OR_EXIT) {
+            event.consume();
+            if (!recoveryDecisionPending) {
+                showRecoveryChoice(currentState);
+            }
         } else {
             listener.windowClosed();
         }
@@ -1429,6 +1444,72 @@ final class JavaFxUpdateView implements UpdateView {
             dialog.setX(stage.getX() + (stage.getWidth() - dialog.getWidth()) / 2.0);
             dialog.setY(stage.getY() + (stage.getHeight() - dialog.getHeight()) / 2.0);
         });
+        return alert;
+    }
+
+    /** Show the fatal-error decision once for each distinct recoverable failure. */
+    private void showRecoveryChoiceIfNeeded(UpdateUiState state) {
+        if (state.getClosePolicy() != ClosePolicy.SKIP_OR_EXIT || recoveryDecisionPending) {
+            return;
+        }
+        String key = String.valueOf(state.getErrorCode()) + "\n"
+                + String.valueOf(state.getErrorMessage());
+        if (key.equals(shownRecoveryError)) {
+            return;
+        }
+        shownRecoveryError = key;
+        showRecoveryChoice(state);
+    }
+
+    /**
+     * Ask whether a failed update should exit or try the last trusted version.
+     * The view reports intent only; rollback, signature verification and launch
+     * authorization remain owned by {@code UpdateController}.
+     */
+    private void showRecoveryChoice(UpdateUiState state) {
+        showQuitOverlay();
+        Optional<ButtonType> choice;
+        try {
+            choice = createRecoveryAlert(state).showAndWait();
+        } finally {
+            hideQuitOverlay();
+        }
+        recoveryDecisionPending = true;
+        if (choice.isPresent() && choice.get() == recoveryTrustedType) {
+            listener.userRequestedSkipUpdate();
+        } else {
+            listener.userRequestedClose();
+        }
+    }
+
+    /** Build the recoverable fatal-error decision dialog. */
+    Alert createRecoveryAlert(UpdateUiState state) {
+        Alert alert = new Alert(Alert.AlertType.NONE);
+        alert.setTitle("Update failed");
+        alert.initStyle(WINDOW_STYLE);
+        makeDialogSceneTransparent(alert);
+        alert.setHeaderText(null);
+        Label header = new Label("Update failed");
+        header.getStyleClass().add("dialog-header");
+        alert.getDialogPane().setHeader(header);
+        alert.setContentText(displayOrDefault(state.getErrorMessage(),
+                "The update could not be completed.")
+                + "\n\nYou can exit, or try the last trusted version. Minecraft starts only "
+                + "after its signed manifest and every local resource are verified.");
+
+        recoveryTrustedType = new ButtonType("Use trusted version", ButtonBar.ButtonData.OK_DONE);
+        ButtonType exit = new ButtonType("Exit", ButtonBar.ButtonData.CANCEL_CLOSE);
+        alert.getButtonTypes().setAll(recoveryTrustedType, exit);
+        alert.initOwner(stage);
+        if (stylesheet != null) {
+            alert.getDialogPane().getStylesheets().add(stylesheet);
+        }
+        alert.getDialogPane().getStyleClass().add("root");
+        Button trustedButton = (Button) alert.getDialogPane().lookupButton(recoveryTrustedType);
+        trustedButton.getStyleClass().add("primary-button");
+        trustedButton.setDefaultButton(true);
+        ((Button) alert.getDialogPane().lookupButton(exit))
+                .getStyleClass().add("window-close-button");
         return alert;
     }
 

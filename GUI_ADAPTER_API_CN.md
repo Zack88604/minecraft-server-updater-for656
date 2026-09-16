@@ -253,6 +253,7 @@ public final class MyGuiView implements UpdateView {
 | `beginCloseConfirmation()` | 即将显示 `CONFIRM` 确认框前立即调用；工作线程会在下一个安全检查点暂停。 |
 | `cancelCloseConfirmation()` | 用户拒绝或关闭确认框时调用；工作线程恢复。 |
 | `requestClose()` | 用户确认关闭后调用；`ALLOW` 策略时可直接调用。 |
+| `requestSkipUpdate()` | 用户接受 `SKIP_OR_EXIT` 的跳过更新选项时调用；controller 会回滚并校验已签名缓存后才启动。 |
 | `notifyWindowClosed()` | 原生窗口真正关闭完成。 |
 
 controller 根据当前状态中的**关闭策略**决定结果：
@@ -261,6 +262,7 @@ controller 根据当前状态中的**关闭策略**决定结果：
 |---------------|------|----------------|
 | `CONFIRM` | 更新进行中 | 将原生关闭操作设为「不执行任何操作」，并在显示工具包确认警告前立刻调用 `beginCloseConfirmation()`；若用户拒绝则调用 `cancelCloseConfirmation()`。若确认则调用 `requestClose()`：更新器取消任务、还原本次更新改动过的全部文件，再启动 Minecraft 并关闭视图。 |
 | `ALLOW` | 更新成功 | 允许关闭；启动锁被释放，窗口关闭。 |
+| `SKIP_OR_EXIT` | 更新过程出现致命异常 | 显示“跳过更新”选项；用户接受时调用 `requestSkipUpdate()`。controller 会还原改动，并仅在已签名缓存校验通过后启动。普通关闭会退出。 |
 | `EXIT_FAILURE` | 更新失败 | 任何关闭（请求或原生）都会调用 `System.exit(1)`——**Minecraft 不会启动**。 |
 
 > 切勿自行释放启动锁或调用 `System.exit`，两者都由 controller 掌控。
@@ -399,6 +401,7 @@ void close();                  // controller 决定关闭窗口
 void beginCloseConfirmation();  // 显示 CONFIRM 确认框前暂停
 void cancelCloseConfirmation(); // 确认被拒绝后恢复
 void requestClose();            // 用户已确认关闭
+void requestSkipUpdate();       // 用户接受 SKIP_OR_EXIT 的跳过选项
 void notifyWindowClosed();      // 原生窗口关闭完成
 ```
 
@@ -406,7 +409,7 @@ void notifyWindowClosed();      // 原生窗口关闭完成
 
 ### 4.6 `ClosePolicy`（枚举）
 
-`CONFIRM` · `ALLOW` · `EXIT_FAILURE` —— 见[第 5 步](#第-5-步--正确处理关闭)的表格。
+`CONFIRM` · `ALLOW` · `SKIP_OR_EXIT` · `EXIT_FAILURE` —— 见[第 5 步](#第-5-步--正确处理关闭)的表格。
 
 ### 4.7 `GuiAdapterContext`（不可变）
 
@@ -434,6 +437,7 @@ void notifyWindowClosed();      // 原生窗口关闭完成
 | `ClosePolicy` | `getClosePolicy()` | 关闭请求的处理策略。 |
 | `UpdateSummary` | `getSummary()` | 最终结果；运行中为 `null`。 |
 | `String` | `getErrorMessage()` | 可安全展示的错误信息；无错误时为 `null`。 |
+| `UpdateErrorCode` | `getErrorCode()` | 机器可读的错误类别；无错误时为 `null`。 |
 
 构造辅助：`UpdateUiState.initial()`、`UpdateUiState.builder()`。在 `render(...)` 中
 **整体渲染整个对象**；把它视为不可变。视图可保留最新快照用于展示和关闭处理，

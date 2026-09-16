@@ -181,7 +181,8 @@ final class JavaFxHelperProcess {
 
     private void startReaders() {
         // stdout carries the helper→agent protocol
-        // (ready / windowClosed / closeRequested / beginCloseConfirmation / cancelCloseConfirmation).
+        // (ready / windowClosed / closeRequested / skipUpdateRequested /
+        // beginCloseConfirmation / cancelCloseConfirmation).
         Thread stdout = new Thread(() -> {
             try (BufferedReader r = new BufferedReader(
                     new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
@@ -245,6 +246,8 @@ final class JavaFxHelperProcess {
             closeAndExit();
         } else if ("closeRequested".equals(type)) {
             actions.requestClose();
+        } else if ("skipUpdateRequested".equals(type)) {
+            actions.requestSkipUpdate();
         } else if ("beginCloseConfirmation".equals(type)) {
             // The Quit-update dialog is open on the helper side; pause the update
             // at its next safe checkpoint (UpdateViewActions.beginCloseConfirmation).

@@ -2,6 +2,7 @@ package com.zack88604.autoupdater.gui.javafx;
 
 import com.zack88604.autoupdater.gui.api.ClosePolicy;
 import com.zack88604.autoupdater.gui.api.DownloadProgress;
+import com.zack88604.autoupdater.gui.api.UpdateErrorCode;
 import com.zack88604.autoupdater.gui.api.UpdatePhase;
 import com.zack88604.autoupdater.gui.api.UpdateSummary;
 import com.zack88604.autoupdater.gui.api.UpdateUiState;
@@ -110,6 +111,8 @@ final class UiStateCodec {
               .append(",\"failed\":").append(summary.getFailedFiles()).append('}');
         }
         sb.append(",\"errorMessage\":").append(encNullable(state.getErrorMessage()));
+        sb.append(",\"errorCode\":").append(encNullable(state.getErrorCode() == null
+                ? null : state.getErrorCode().name()));
 
         // Self-contained log tail (constraint 2): total + omitted + newest lines.
         sb.append(",\"logTotal\":").append(logTotal);
@@ -142,6 +145,10 @@ final class UiStateCodec {
 
     static String encodeCloseRequested() {
         return "{\"type\":\"closeRequested\"}";
+    }
+
+    static String encodeSkipUpdateRequested() {
+        return "{\"type\":\"skipUpdateRequested\"}";
     }
 
     /** The Quit-update confirmation dialog is about to open; the agent pauses
@@ -226,6 +233,7 @@ final class UiStateCodec {
         ClosePolicy closePolicy = parseClosePolicy(stringOf(line, "closePolicy"));
         UpdateSummary summary = decodeSummary(line);
         String errorMessage = nullableStringOf(line, "errorMessage");
+        UpdateErrorCode errorCode = parseErrorCode(nullableStringOf(line, "errorCode"));
         List<String> log = decodeStringArray(line, "log");
 
         return UpdateUiState.builder()
@@ -241,6 +249,7 @@ final class UiStateCodec {
                 .closePolicy(closePolicy)
                 .summary(summary)
                 .errorMessage(errorMessage)
+                .errorCode(errorCode)
                 .build();
     }
 
@@ -316,6 +325,7 @@ final class UiStateCodec {
                 .closePolicy(state.getClosePolicy())
                 .summary(state.getSummary())
                 .errorMessage(state.getErrorMessage())
+                .errorCode(state.getErrorCode())
                 .build();
     }
 
@@ -394,6 +404,17 @@ final class UiStateCodec {
             return ClosePolicy.valueOf(name);
         } catch (IllegalArgumentException e) {
             return ClosePolicy.CONFIRM;
+        }
+    }
+
+    private static UpdateErrorCode parseErrorCode(String name) {
+        if (name == null || name.isEmpty()) {
+            return null;
+        }
+        try {
+            return UpdateErrorCode.valueOf(name);
+        } catch (IllegalArgumentException e) {
+            return UpdateErrorCode.UNKNOWN;
         }
     }
 
