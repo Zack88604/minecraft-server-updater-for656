@@ -74,8 +74,9 @@ import java.util.regex.Pattern;
  * <p>The phase is carried explicitly by the snapshot, so the view never infers it
  * from status text. While an update is in progress the window close request is
  * intercepted and the user must confirm quitting; the update is paused while the
- * Quit-update dialog is open (begin/cancel close confirmation) and in the
- * terminal SUCCESS/ERROR phases the close request is honoured directly.</p>
+ * Quit-update dialog is open (begin/cancel close confirmation). Terminal
+ * SUCCESS closes directly; a recoverable ERROR waits until the user closes the
+ * window before offering the last trusted version.</p>
  *
  * <p>The window is frameless ({@link StageStyle#TRANSPARENT}): the custom title
  * bar carries a × button that fires the same {@code WINDOW_CLOSE_REQUEST} the
@@ -279,7 +280,6 @@ final class JavaFxUpdateView implements UpdateView {
     // no space in any other phase.
     private final Button btnErrorHelp = new Button("? Get help");
     private UpdateUiState errorState;
-    private String shownRecoveryError;
     private boolean recoveryDecisionPending;
 
     // Persistent bottom copyright line (always the last row of the root).
@@ -437,7 +437,6 @@ final class JavaFxUpdateView implements UpdateView {
         applyServer(state);
         applyLog(state);
         applyCloseButton(state);
-        showRecoveryChoiceIfNeeded(state);
     }
 
     /** Close the window. Must be called on the JavaFX Application Thread. */
@@ -1211,8 +1210,9 @@ final class JavaFxUpdateView implements UpdateView {
 
     /**
      * Intercept the window close request. While an update is running the close
-     * is consumed and the user is asked to confirm; the terminal SUCCESS/ERROR
-     * phases close directly (notifying the agent the window closed).
+     * is consumed and the user is asked to confirm. A recoverable ERROR also
+     * consumes the request and offers the last trusted version; other terminal
+     * states close directly (notifying the agent the window closed).
      */
     private void onCloseRequestedByUser(javafx.event.Event event) {
         if (closing) {
@@ -1239,9 +1239,9 @@ final class JavaFxUpdateView implements UpdateView {
      * old system title-bar close, so it fires the same
      * {@link WindowEvent#WINDOW_CLOSE_REQUEST} the OS would and lets the normal
      * {@code onCloseRequest} path run unchanged: in-progress phases open the
-     * Quit-update confirmation (begin/cancel/confirm close confirmation +
-     * UpdateViewActions lifecycle), terminal phases report {@code windowClosed}
-     * straight to the agent. It never calls {@code stage.close()} directly.
+     * Quit-update confirmation, recoverable errors open the trusted-version
+     * choice, and directly closable states report {@code windowClosed} to the
+     * agent. It never calls {@code stage.close()} directly.
      * When the handler did not consume the request (terminal phase), the
      * platform would have hidden the window after delivering the close request —
      * emulate that here so the visible behaviour matches the decorated window;
@@ -1452,20 +1452,6 @@ final class JavaFxUpdateView implements UpdateView {
             dialog.setY(stage.getY() + (stage.getHeight() - dialog.getHeight()) / 2.0);
         });
         return alert;
-    }
-
-    /** Show the fatal-error decision once for each distinct recoverable failure. */
-    private void showRecoveryChoiceIfNeeded(UpdateUiState state) {
-        if (state.getClosePolicy() != ClosePolicy.SKIP_OR_EXIT || recoveryDecisionPending) {
-            return;
-        }
-        String key = String.valueOf(state.getErrorCode()) + "\n"
-                + String.valueOf(state.getErrorMessage());
-        if (key.equals(shownRecoveryError)) {
-            return;
-        }
-        shownRecoveryError = key;
-        showRecoveryChoice(state);
     }
 
     /**
