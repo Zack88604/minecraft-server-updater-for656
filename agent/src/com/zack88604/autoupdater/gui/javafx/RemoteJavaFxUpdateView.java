@@ -85,13 +85,31 @@ final class RemoteJavaFxUpdateView implements UpdateView {
 
     @Override
     public void close() {
-        closed = true;
-        JavaFxHelperProcess h = helper;
+        JavaFxHelperProcess h;
+        boolean closeSwingFallback;
+        synchronized (lock) {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            h = helper;
+            closeSwingFallback = fallbackEngaged;
+        }
+
+        // A failed helper remains attached after Swing takes over. Shut it down
+        // for cleanup, but do not return before closing the active Swing window.
         if (h != null) {
             h.closeAndExit();
-            return;
         }
-        dispatchSwing(() -> {
+
+        if (closeSwingFallback) {
+            dispatchSwingClose();
+        }
+    }
+
+    /** Close an existing fallback view without creating one during shutdown. */
+    private void dispatchSwingClose() {
+        swingFallback.dispatcher().dispatch(() -> {
             if (swingView != null) {
                 swingView.close();
             }
@@ -119,11 +137,14 @@ final class RemoteJavaFxUpdateView implements UpdateView {
     /** Run {@code task} on the Swing EDT, lazily creating + opening the view. */
     private void dispatchSwing(Runnable task) {
         swingFallback.dispatcher().dispatch(() -> {
+            // close() may win the race after fallback was engaged but before
+            // this queued EDT task runs. Never create an invisible orphan view.
+            if (closed) {
+                return;
+            }
             if (swingView == null) {
                 swingView = swingFallback.create(actions);
-                if (!closed) {
-                    swingView.open();
-                }
+                swingView.open();
             }
             task.run();
         });

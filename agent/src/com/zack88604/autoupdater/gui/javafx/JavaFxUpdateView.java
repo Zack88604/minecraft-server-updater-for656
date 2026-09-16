@@ -546,13 +546,23 @@ final class JavaFxUpdateView implements UpdateView {
         }
     }
 
-    /** Set the overall progress bar and percentage for determinate phases. */
+    /** Set the overall progress bar from the snapshot's explicit progress mode. */
     private void applyOverall(UpdateUiState state) {
         UpdatePhase p = state.getPhase();
+        if (state.isOverallProgressIndeterminate()) {
+            // Progress mode belongs to the state contract, not to the phase:
+            // CHECKING is also indeterminate during rollback/cache verification.
+            stopProgressTween(overallProgressTween);
+            overallBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
+            overallProgressInitialized = false;
+            lastOverallTarget = Double.NaN;
+            clearOverallPercent();
+            overallArea.setVisible(true);
+            return;
+        }
         if (p == UpdatePhase.ERROR) {
             stopProgressTween(overallProgressTween);
             if (!hasMeaningfulOverallProgress
-                    && !state.isOverallProgressIndeterminate()
                     && state.getOverallProgressPercent() > 0) {
                 hasMeaningfulOverallProgress = true;
                 lastMeaningfulOverallProgress =
@@ -569,9 +579,6 @@ final class JavaFxUpdateView implements UpdateView {
                 overallArea.setVisible(false);
             }
             return;
-        }
-        if (p == UpdatePhase.PREPARING || p == UpdatePhase.CLEANING) {
-            return;   // setPhase already configured the indeterminate bar
         }
         double target = clamp(state.getOverallProgressPercent()) / 100.0;
         if (target > 0.0) {
