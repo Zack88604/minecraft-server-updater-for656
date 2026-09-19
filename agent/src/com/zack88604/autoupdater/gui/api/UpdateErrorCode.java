@@ -18,3 +18,4 @@ public enum UpdateErrorCode {
     FILESYSTEM,
     /** The updater could not classify the failure more precisely. */
     UNKNOWN
+}
